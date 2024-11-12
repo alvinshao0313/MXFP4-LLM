@@ -1,5 +1,6 @@
 model=none
-seed=0 tasks=piqa
+seed=0
+tasks=piqa
 num_fewshot=none
 eval_ppl=true
 
@@ -37,9 +38,8 @@ rotate_kv=true
 kv_quant_only=false
 kv_tokenwise=false
 
-for m in llama2-7b
+for model in $2
 do
-model=/raid/LLM/$m
 for scale_bits in 8
 do
 scale_bits_linear=$scale_bits

@@ -1,0 +1,7 @@
+einops==0.6.1
+transformers==4.37.0
+datasets==2.17.0
+seaborn
+fast_hadamard_transform
+transformers_stream_generator
+tiktoken

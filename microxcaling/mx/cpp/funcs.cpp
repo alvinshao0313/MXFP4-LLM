@@ -147,14 +147,13 @@ torch::Tensor quantize_mx_func_cuda(
     int elem_ebits,
     int elem_mbits,
     float elem_max_norm,
-    torch::Tensor max_values, // Max values along axis of interest
-    torch::Tensor pos_values, // Max values along axis of interest
-    torch::Tensor neg_values, // Max values along axis of interest
-    torch::Tensor std_values, // Max values along axis of interest
+    torch::Tensor max_values, 
+    torch::Tensor pos_values, 
+    torch::Tensor neg_values, 
+    torch::Tensor std_values, 
     int axis,  // Axis along which exponents are shared
     const bool flush_fp32_subnorms = false,
     const int rmode = 0,
-    // JHLEE
     const int scale_mode = 0,
     const int asym = -1
 ) {

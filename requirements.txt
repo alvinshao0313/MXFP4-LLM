@@ -5,3 +5,4 @@ seaborn
 fast_hadamard_transform
 transformers_stream_generator
 tiktoken
+huggingface-hub==0.24.7

@@ -168,7 +168,7 @@ class MxSpecs(collections.UserDict):
             "vec_use_recip": "Use 1/x to compute division",
 
             "custom_cuda": "Enable custom CUDA kernels for quantization",
-            # JHLEE
+
             "a_scale_mode": "Full-precision shared scale instead of PoT",
             "w_scale_mode": "Full-precision shared scale instead of PoT",
             "A_scale_mode": "Full-precision shared scale instead of PoT",

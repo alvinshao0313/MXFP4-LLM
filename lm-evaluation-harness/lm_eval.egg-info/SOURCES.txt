@@ -1098,6 +1098,7 @@ lm_eval/tasks/headqa/headqa_es.yaml
 lm_eval/tasks/hellaswag/README.md
 lm_eval/tasks/hellaswag/hellaswag.yaml
 lm_eval/tasks/hellaswag/utils.py
+lm_eval/tasks/hellaswag/__pycache__/utils.cpython-310.pyc
 lm_eval/tasks/hendrycks_ethics/README.md
 lm_eval/tasks/hendrycks_ethics/commonsense.yaml
 lm_eval/tasks/hendrycks_ethics/deontology.yaml

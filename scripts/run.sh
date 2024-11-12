@@ -1,8 +1,5 @@
-export HF_HOME=/hf_cache
-
 model=none
-seed=0
-tasks=piqa
+seed=0 tasks=piqa
 num_fewshot=none
 eval_ppl=true
 
@@ -34,7 +31,7 @@ A_scale_mode=0
 B_scale_mode=0 
 per_tensor=false
 
-quarot=false
+quarot=true
 rotate_mode=hadamard
 rotate_kv=true
 kv_quant_only=false
@@ -59,7 +56,7 @@ w_elem_format_linear=$format
 A_elem_format_matmul=$format
 a_elem_format_linear=$format
 B_elem_format_matmul=$format
-for scale_mode in 152
+for scale_mode in 2
 do
 w_scale_mode=$scale_mode
 A_scale_mode=$scale_mode
@@ -72,41 +69,34 @@ CUDA_VISIBLE_DEVICES=$1 python main.py \
     --tasks=$tasks \
     --num_fewshot=$num_fewshot \
     --eval_ppl=$eval_ppl \
-
     --w_elem_format_linear=$w_elem_format_linear \
     --a_elem_format_linear=$a_elem_format_linear \
     --scale_bits_linear=$scale_bits_linear \
     --block_size_linear=$block_size_linear \
-
     --A_elem_format_matmul=$A_elem_format_matmul \
     --B_elem_format_matmul=$B_elem_format_matmul \
     --scale_bits_matmul=$scale_bits_matmul \
     --block_size_matmul=$block_size_matmul \
-
     --w_elem_format_ln=$w_elem_format_ln \
     --a_elem_format_ln=$a_elem_format_ln \
     --scale_bits_ln=$scale_bits_ln \
     --block_size_ln=$block_size_ln \
-
     --w_elem_format_head=$w_elem_format_head \
     --a_elem_format_head=$a_elem_format_head \
     --scale_bits_head=$scale_bits_head \
     --block_size_head=$block_size_head \
-
     --auto_dtype=$auto_dtype \
     --custom_cuda=$custom_cuda \
-
     --a_scale_mode=$a_scale_mode \
     --w_scale_mode=$w_scale_mode \
     --A_scale_mode=$A_scale_mode \
     --B_scale_mode=$B_scale_mode \
     --per_tensor=$per_tensor \
-
     --quarot=$quarot \
     --rotate_mode=$rotate_mode \
     --rotate_kv=$rotate_kv \
     --kv_quant_only=$kv_quant_only \
-    --kv_tokenwise=$kv_tokenwise \
+    --kv_tokenwise=$kv_tokenwise
 done
 done
 done

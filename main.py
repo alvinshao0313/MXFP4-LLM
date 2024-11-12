@@ -37,7 +37,7 @@ def main(args):
         rotation_utils.rotate_model(model, args)
         rotation_utils.cleanup_memory(verbos=True)
     else:
-        dev = 'cpu' if args.weight_prequant else 'balanced'
+        dev = 'balanced'
         kwargs = {'device_map':dev,'trust_remote_code':True,'attn_implementation':"eager"}
         model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype='auto' if args.auto_dtype else torch.float32, **kwargs)
 
@@ -135,7 +135,6 @@ def main(args):
         with torch.no_grad():
             pbar = tqdm(range(nsamples))
             for i in pbar:
-                if i==args.nsamples: break
                 batch = testenc[:, (i * seqlen) : ((i + 1) * seqlen)].to('cuda')
                 if "opt" in args.model.lower():
                     outputs = model.model.decoder(batch)
@@ -183,7 +182,6 @@ def main(args):
                 model=lm,
                 tasks=args.tasks,
                 num_fewshot=args.num_fewshot,
-                limit=args.nsamples,
             )
         results = results['results']
     logging.info(results)

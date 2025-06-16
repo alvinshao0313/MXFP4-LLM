@@ -3,10 +3,12 @@ import torch
 import typing
 import utils
 import transformers
-import tqdm, math
+import tqdm
+import math
 from scale_utils.hadamard_utils import random_hadamard_matrix, apply_exact_had_to_linear, is_pow2
 from fast_hadamard_transform import hadamard_transform
 import logging
+
 
 def fuse_ln_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[torch.nn.Linear]) -> None:
     """
@@ -24,7 +26,8 @@ def fuse_ln_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[to
                 linear.bias = torch.nn.Parameter(torch.zeros(linear.out_features, dtype=torch.float64))
             linear.bias.data = linear.bias.data.double() + torch.matmul(W_, layernorm.bias.double())
             linear.bias.data = linear.bias.data.to(linear_dtype)
-            
+
+
 def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
     """
     This function takes a linear layer and subtracts the means from the
@@ -39,45 +42,50 @@ def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
         b_ = linear.bias.data.double()
         linear.bias.data = b_ - b_.mean()
         linear.bias.data = linear.bias.data.to(linear_dtype)
-            
+
+
 def fuse_layer_norms(model):
-    
+
     model_type = model_utils.get_model_type(model)
-    
+
     kwargs = {'model': model, 'model_type': model_type}
-    
+
     # Embedding fusion
     for W in model_utils.get_embeddings(**kwargs):
         W_ = W.weight.data.double()
         W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
-        
+
     layers = model_utils.get_transformer_layers(**kwargs)
-    
+
     # Fuse the linear operations in Layernorm into the adjacent linear blocks.
     for layer in layers:
-        
+
         # fuse the input layernorms into the linear layers
         if model_type == model_utils.LLAMA_MODEL:
-            fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])    
-            fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj])
+            fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])
+            fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj,
+                           layer.self_attn.k_proj, layer.self_attn.v_proj])
         elif model_type == model_utils.MISTRAL_MODEL:
-            fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])    
-            fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj])
+            fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])
+            fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj,
+                           layer.self_attn.k_proj, layer.self_attn.v_proj])
         elif model_type == model_utils.QWEN2_MODEL:
-            fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])    
-            fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj])
+            fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])
+            fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj,
+                           layer.self_attn.k_proj, layer.self_attn.v_proj])
         elif model_type == model_utils.OPT_MODEL:
-            fuse_ln_linear(layer.self_attn_layer_norm, [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj])
+            fuse_ln_linear(layer.self_attn_layer_norm, [layer.self_attn.q_proj,
+                           layer.self_attn.k_proj, layer.self_attn.v_proj])
             fuse_ln_linear(layer.final_layer_norm, [layer.fc1])
         else:
             raise ValueError(f'Unknown model type {model_type}')
-            
+
         if model_type == model_utils.OPT_MODEL:
             bake_mean_into_linear(layer.self_attn.out_proj)
             bake_mean_into_linear(layer.fc2)
-    
+
     fuse_ln_linear(model_utils.get_pre_head_layernorm(**kwargs), [model_utils.get_lm_head(**kwargs)])
-    
+
     if model_type == model_utils.LLAMA_MODEL:
         model_utils.replace_modules(
             model,
@@ -106,17 +114,18 @@ def fuse_layer_norms(model):
             lambda _: model_utils.RMSN(model.config.hidden_size),
             replace_layers=False,
         )
-    
+
+
 def random_orthogonal_matrix(size, device):
     """
     Generate a random orthogonal matrix of the specified size.
     First, we generate a random matrix with entries from a standard distribution.
     Then, we use QR decomposition to obtain an orthogonal matrix.
     Finally, we multiply by a diagonal matrix with diag r to adjust the signs.
-    
+
     Args:
     size (int): The size of the matrix (size x size).
-    
+
     Returns:
     torch.Tensor: An orthogonal matrix of the specified size.
     """
@@ -126,13 +135,28 @@ def random_orthogonal_matrix(size, device):
     q *= torch.sign(torch.diag(r)).unsqueeze(0)
     return q
 
-def get_orthogonal_matrix(size, mode, device="cuda:0"):
+
+def group_hadamard_matrix(full_size, had_dim, device):
+    assert is_pow2(had_dim), "group_size must be a power of 2"
+    had = random_hadamard_matrix(had_dim, device)
+    group_had = torch.zeros((full_size, full_size), dtype=torch.float64, device=device)
+    for i in range(0, full_size, had_dim):
+        group_had[i:i + had_dim, i:i + had_dim] = had
+    return group_had
+
+
+def get_orthogonal_matrix(size, mode, device="cuda:0", **kwargs):
     if mode == 'random':
         return random_orthogonal_matrix(size, device)
     elif mode == 'hadamard':
         return random_hadamard_matrix(size, device)
+    elif mode == 'group_hadamard':
+        assert kwargs.get('had_dim', False), "had_dim must be specified for group hadamard mode"
+        had_dim = kwargs['had_dim']
+        return group_hadamard_matrix(size, had_dim, device)
     else:
         raise ValueError(f'Unknown mode {mode}')
+
 
 def rotate_embeddings(model, Q: torch.Tensor) -> None:
     # Rotate the embeddings.
@@ -142,12 +166,14 @@ def rotate_embeddings(model, Q: torch.Tensor) -> None:
         W_ = W.weight.data.to(device="cuda:0", dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
+
 def rotate_attention_inputs(layer, Q, model_type) -> None:
     # Rotate the WQ, WK and WV matrices of the self-attention layer.
     for W in [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]:
         dtype = W.weight.dtype
         W_ = W.weight.to(device="cuda:0", dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
+
 
 def rotate_attention_output(layer, Q, model_type) -> None:
     # Rotate output matrix of the self-attention layer.
@@ -169,7 +195,8 @@ def rotate_attention_output(layer, Q, model_type) -> None:
         b = W.bias.data.to(device="cuda:0", dtype=torch.float64)
         W.bias.data = torch.matmul(Q.T, b).to(device="cpu", dtype=dtype)
 
-def rotate_mlp_input(layer, Q, model_type):
+
+def rotate_mlp_input(layer, Q, model_type, **kwargs):
     # Rotate the MLP input weights.
     if model_type == model_utils.LLAMA_MODEL:
         mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
@@ -185,8 +212,12 @@ def rotate_mlp_input(layer, Q, model_type):
         dtype = W.weight.dtype
         W_ = W.weight.data.to(device="cuda:0", dtype=torch.float64)
         W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
-    
-def rotate_mlp_output(layer, Q, model_type):
+        if kwargs.get('reflow', False):
+            # Reflow the weights if sorting transform is applied.
+            W.weight.data = W.weight.data[kwargs["sorting_idx"], :]
+
+
+def rotate_mlp_output(layer, Q, model_type, args, **kwargs):
     # Rotate the MLP output weights and bias.
     if model_type == model_utils.LLAMA_MODEL:
         W = layer.mlp.down_proj
@@ -201,15 +232,27 @@ def rotate_mlp_output(layer, Q, model_type):
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device="cuda:0", dtype=torch.float64)
     W.weight.data = torch.matmul(Q.T, W_).to(device="cpu", dtype=dtype)
-    apply_exact_had_to_linear(W, had_dim=-1, output=False) #apply exact (inverse) hadamard on the weights of mlp output
+    if args.rotate_mode == 'hadamard':
+        # apply exact (inverse) hadamard on the weights of mlp output
+        apply_exact_had_to_linear(W, had_dim=-1, output=False)
+    elif args.rotate_mode == 'group_hadamard':
+        W_ = W.weight.data.to(device="cuda:0", dtype=torch.float32)
+        init_shape = W_.shape
+        had_dim = args.block_size_linear
+        if kwargs.get('reflow', False):
+            # Reflow the weights if sorting transform is applied.
+            W_ = W_[:, kwargs["sorting_idx"]]
+        W.weight.data = hadamard_transform(W_.reshape(-1, init_shape[-1] // had_dim,
+                                                      had_dim), scale=1 / math.sqrt(had_dim)).reshape(init_shape)
     if W.bias is not None:
         b = W.bias.data.to(device="cuda:0", dtype=torch.float64)
         W.bias.data = torch.matmul(Q.T, b).to(device="cpu", dtype=dtype)
 
+
 def matmul_hadU_cuda_had(X, hadK, transpose=False):
     '''
-    Apply hadamard transformation. 
-    It reshapes X and applies Walsh-Hadamard transform to the last dimension. 
+    Apply hadamard transformation.
+    It reshapes X and applies Walsh-Hadamard transform to the last dimension.
     Then, it will multiply the retult by another hadamard matrix.
     '''
     from fast_hadamard_transform import hadamard_transform
@@ -220,12 +263,12 @@ def matmul_hadU_cuda_had(X, hadK, transpose=False):
     if transpose:
         hadK = hadK.T.contiguous()
     input = X.float().cuda().view(-1, K, n // K)
-    input = hadamard_transform(input.contiguous(), scale=1/math.sqrt(n))
-    input = hadK.to(input.device).to(input.dtype) @ input 
+    input = hadamard_transform(input.contiguous(), scale=1 / math.sqrt(n))
+    input = hadK.to(input.device).to(input.dtype) @ input
     return input.to(X.device).to(X.dtype).reshape(
-        X.shape) 
+        X.shape)
 
-#def rotate_faster_down_proj(layer, model_type, hardK):
+# def rotate_faster_down_proj(layer, model_type, hardK):
 #    from fast_hadamard_transform import hadamard_transform
 #    if model_type == model_utils.LLAMA_MODEL:
 #        W = layer.mlp.down_proj
@@ -233,7 +276,7 @@ def matmul_hadU_cuda_had(X, hadK, transpose=False):
 #        W = layer.mlp.down_proj
 #    else:
 #        raise ValueError(f'Faster MLP is onlu supported for LLaMa models!')
-#    
+#
 #    dtype = W.weight.data.dtype
 #    W.weight.data = matmul_hadU_cuda_had(W.weight.data.float().cuda(), hardK)
 #    W.weight.data = W.weight.data.to(device="cpu", dtype=dtype)
@@ -246,7 +289,8 @@ def rotate_head(model, Q: torch.Tensor) -> None:
     W_ = W.weight.data.to(device="cuda:0", dtype=torch.float64)
     W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
 
-def rotate_ov_proj(layer, model_type, head_num, head_dim):
+
+def rotate_ov_proj(layer, model_type, head_num, head_dim, args, **kwargs):
     v_proj = layer.self_attn.v_proj
     if model_type == model_utils.LLAMA_MODEL:
         o_proj = layer.self_attn.o_proj
@@ -258,46 +302,107 @@ def rotate_ov_proj(layer, model_type, head_num, head_dim):
         o_proj = layer.self_attn.out_proj
     else:
         raise ValueError(f'Unknown model type {model_type}')
-    
-    apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
-    apply_exact_had_to_linear(o_proj, had_dim=-1, output=False)
+    if args.online_partial_had:
+        apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(o_proj, had_dim=-1, output=False)
+    else:
+        assert kwargs.get('Q2', None) is not None, "Q2 must be specified for group hadamard mode"
+        Q2 = kwargs['Q2']
+        apply_multi_head_rotate(v_proj, Q2, head_dim, head_num, output=True, **kwargs)
+        apply_multi_head_rotate(o_proj, Q2, head_dim, head_num, output=False, **kwargs)
+
+
+def apply_multi_head_rotate(module, Q, head_dim, head_num, output=False, **kwargs):
+    assert isinstance(module, torch.nn.Linear)
+    W_ = module.weight.data
+    dtype = W_.dtype
+    dev = W_.device
+    init_shape = W_.shape
+    W_ = W_.to(device="cuda:0", dtype=torch.float64)
+
+    if output:
+        if kwargs.get('reflow', False):
+            W_ = W_[kwargs['sorting_idx'], :]
+        W_ = W_.t()
+        transposed_shape = W_.shape
+        W_ = W_.reshape(-1, head_num, head_dim).transpose(0, 1)
+        W_ = torch.matmul(W_, Q)
+        W_ = W_.transpose(0, 1).reshape(transposed_shape).t()
+    else:
+        if kwargs.get('reflow', False):
+            n_rep = init_shape[1] // (head_dim * head_num)
+            W_ = W_.reshape(init_shape[0], head_num, n_rep, head_dim).transpose(1, 2).reshape(
+                init_shape[0], n_rep, -1)[:, :, kwargs['sorting_idx']]
+            W_ = W_.reshape(init_shape[0], n_rep, head_num, head_dim).transpose(0, 1).reshape(init_shape)
+        W_ = W_.reshape(-1, init_shape[1] // head_dim,
+                        head_dim).transpose(0, 1)
+        W_ = torch.matmul(W_, Q)
+        W_ = W_.transpose(0, 1).reshape(init_shape)
+
+    module.weight.data = W_.to(device=dev, dtype=dtype)
 
 
 @torch.inference_mode()
 def rotate_model(model, args):
-    Q = get_orthogonal_matrix(model.config.hidden_size,
-                                                args.rotate_mode)
     config = model.config
     num_heads = config.num_attention_heads
     model_dim = config.hidden_size
     head_dim = model_dim // num_heads
+    kv_head = config.num_key_value_heads
 
+    kwargs = {'had_dim': args.block_size_linear} if args.rotate_mode == 'group_hadamard' else {}
+    Q1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode, device="cuda:0", **kwargs)
+    if args.sorting_transform:
+        sorting_transforms = torch.load(args.sorting_transform, map_location='cpu', weights_only=False)
+        sorted_idx = sorting_transforms["R1"]
+        s_Q1 = torch.eye(model.config.hidden_size, device="cuda:0", dtype=torch.float64)[:, sorted_idx]
+        Q1 = s_Q1 @ Q1
+        del s_Q1
+    Q2 = get_orthogonal_matrix(head_dim, args.rotate_mode, device="cuda:0", **kwargs)
+    # Q1 = get_orthogonal_matrix(model.config.hidden_size, 'hadamard', device="cuda:0")
+    # Q2 = get_orthogonal_matrix(head_dim, 'hadamard', device="cuda:0")
 
     model_type = model_utils.model_type_extractor(model)
-    rotate_embeddings(model, Q)
-    rotate_head(model, Q)
+    rotate_embeddings(model, Q1)
+    rotate_head(model, Q1)
     cleanup_memory()
-    layers = model_utils.get_transformer_layers(model, 
+    layers = model_utils.get_transformer_layers(model,
                                                 model_type=model_type)
     for idx, layer in enumerate(tqdm.tqdm(layers, unit="layer", desc="Rotating")):
-        rotate_attention_inputs(layers[idx], Q, model_type)
-        rotate_attention_output(layers[idx], Q, model_type)
-        rotate_mlp_input(layers[idx], Q, model_type)
-        rotate_mlp_output(layers[idx], Q, model_type)
-        rotate_ov_proj(layers[idx], model_type, num_heads, head_dim)
+        rotate_attention_inputs(layers[idx], Q1, model_type)
+        rotate_attention_output(layers[idx], Q1, model_type)
+        rotate_mlp_input(layers[idx], Q1, model_type,
+                         **{
+            'sorting_idx': sorting_transforms[f"model.layers.{idx}.self_attn.R4"] if args.sorting_transform else None,
+            'reflow': True if args.sorting_transform else False
+        })
+        rotate_mlp_output(layers[idx], Q1, model_type, args,
+                          **{
+            'sorting_idx': sorting_transforms[f"model.layers.{idx}.self_attn.R4"] if args.sorting_transform else None,
+            'reflow': True if args.sorting_transform else False
+        })
+        rotate_ov_proj(layers[idx], model_type, kv_head, head_dim, args,
+                       **{
+            'Q2': Q2 if not args.online_partial_had else None,
+            'sorting_idx': sorting_transforms[f"model.layers.{idx}.self_attn.R2"] if args.sorting_transform else None,
+            'reflow': True if args.sorting_transform else False
+        })
+
 
 @torch.inference_mode
 def online_rotate(module, inp):
     x = torch.nn.functional.linear(inp[0], module.Q)
     return (x,) + inp[1:]
 
-def register_online_rotation(module, Q:torch.Tensor):
+
+def register_online_rotation(module, Q: torch.Tensor):
     assert not hasattr(module, 'Q')
     module.register_buffer('Q', Q.T.to(module.weight.data))  # Note F.linear(x, A) performs x@A.T
 
     # We use forward_pre_hook because we capture the input using forward_hook, which could then capture the rotated input.
     # If we implement in the forward() the un-rotated original input will be captured.
     module.rotate_handle = module.register_forward_pre_hook(online_rotate)
+
 
 def cleanup_memory(verbos=True) -> None:
     """Run GC and clear GPU memory."""
@@ -326,23 +431,35 @@ def cleanup_memory(verbos=True) -> None:
                 f" ({(memory_after - memory_before) / (1024 ** 3):.2f} GB)"
             )
 
+
 class QKRotationWrapper(torch.nn.Module):
-    def __init__(self, func, config, *args, **kwargs):
+    def __init__(self, func, config, had_dim: int = -1, *args, **kwargs):
         super().__init__()
         self.config = config
         self.func = func
+        self.had_dim = had_dim
 
     def forward(self, *args, **kwargs):
         q, k = self.func(*args, **kwargs)
         dtype = q.dtype
-        q = hadamard_transform(q.float(), scale=1/math.sqrt(q.shape[-1])).to(dtype)
-        k = hadamard_transform(k.float(), scale=1/math.sqrt(k.shape[-1])).to(dtype)
+        q_shape = q.shape
         (bsz, num_heads, seq_len, head_dim) = k.shape
+        if self.had_dim > 0:
+            # Apply hadamard transform to q and k
+            q = hadamard_transform(q.reshape(bsz, -1, seq_len, head_dim // self.had_dim,
+                                   self.had_dim).float(), scale=1 / math.sqrt(self.had_dim)).to(dtype).reshape(q_shape)
+            k = hadamard_transform(k.reshape(bsz, -1, seq_len, head_dim // self.had_dim,
+                                   self.had_dim).float(), scale=1 / math.sqrt(self.had_dim)).to(dtype).reshape(bsz, num_heads, seq_len, head_dim)
+        else:
+            # Apply standard hadamard transform
+            q = hadamard_transform(q.float(), scale=1 / math.sqrt(q.shape[-1])).to(dtype)
+            k = hadamard_transform(k.float(), scale=1 / math.sqrt(k.shape[-1])).to(dtype)
         return q, k
+
 
 def add_qk_rotation_wrapper_after_function_call_in_forward(module, function_name, *args, **kwargs):
     '''
-    This function adds a rotation wrapper after the output of a function call in forward. 
+    This function adds a rotation wrapper after the output of a function call in forward.
     Only calls directly in the forward function are affected. calls by other functions called in forward are not affected.
     '''
     from scale_utils import monkeypatch

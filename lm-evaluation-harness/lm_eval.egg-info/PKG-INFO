@@ -1,4 +1,4 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: lm_eval
 Version: 0.4.2
 Summary: A framework for evaluating language models
@@ -99,6 +99,7 @@ Requires-Dist: lm_eval[testing]; extra == "all"
 Requires-Dist: lm_eval[vllm]; extra == "all"
 Requires-Dist: lm_eval[zeno]; extra == "all"
 Requires-Dist: lm_eval[wandb]; extra == "all"
+Dynamic: license-file
 
 # Language Model Evaluation Harness
 

@@ -21,6 +21,7 @@ import math
 f_linear = F.linear
 torch_matmul = torch.matmul
 
+
 class LinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -238,13 +239,21 @@ class Linear(torch.nn.Linear):
             init_shape = inputs.shape
             if self.K == 1:
                 inputs = fast_hadamard_transform.hadamard_transform(
-                    inputs.reshape(-1, init_shape[-1]//self.had_dim, self.had_dim).transpose(1, 2),
-                    scale=1/math.sqrt(init_shape[-1]//self.had_dim)
+                    inputs.reshape(-1, init_shape[-1] // self.had_dim, self.had_dim).transpose(1, 2),
+                    scale=1 / math.sqrt(init_shape[-1] // self.had_dim)
                 ).transpose(1, 2)
             else:
-                inputs = (self.had_K.to(inputs.dtype).to(inputs.device) @ inputs.reshape(-1, init_shape[-1]//self.had_dim, self.had_dim)) / math.sqrt(init_shape[-1]//self.had_dim)
+                inputs = (self.had_K.to(inputs.dtype).to(inputs.device) @ inputs.reshape(-1,
+                          init_shape[-1] // self.had_dim, self.had_dim)) / math.sqrt(init_shape[-1] // self.had_dim)
             inputs = inputs.reshape(init_shape)
-
+        elif hasattr(self, "online_group_had"):
+            assert self.had_dim > 0 and self.K == 1, "Group Hadamard transform requires had_dim > 0 and K == 1"
+            # Group Hadamard transform
+            init_shape = inputs.shape
+            inputs = fast_hadamard_transform.hadamard_transform(
+                inputs.reshape(-1, init_shape[-1] // self.had_dim, self.had_dim),
+                scale=1 / math.sqrt(self.had_dim))
+            inputs = inputs.reshape(init_shape)
         out = linear(
             input=inputs,
             weight=self.weight,

@@ -48,12 +48,12 @@ B_scale_mode=0
 per_tensor=false
 
 rotate=true
-rotate_mode=hadamard
+rotate_mode=group_hadamard
 rotate_kv=true
 sorting_transform=/home/shaoyuantian/program/MixedPrecision/act_avg/wikitext2_128samples/Meta-Llama-3-8B/sorting_idx/sorted_idx.pt
-group_rotate_kv=true
-kv_quant_only=true
-kv_tokenwise=true
+group_rotate_kv=false
+kv_quant_only=false
+kv_tokenwise=false
 
 for model in $2
 do
@@ -67,7 +67,7 @@ for block_size in 16
 do
 block_size_linear=$block_size
 block_size_matmul=$block_size
-for format in none
+for format in fp4_e2m1
 do
 w_elem_format_linear=$format
 A_elem_format_matmul=$format

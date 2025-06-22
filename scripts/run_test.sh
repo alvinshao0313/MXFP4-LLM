@@ -48,43 +48,40 @@ B_scale_mode=0
 per_tensor=false
 
 rotate=true
-rotate_mode=group_hadamard
+rotate_mode=hadamard
+gptq=true
 rotate_kv=true
-sorting_transform=/home/shaoyuantian/program/MXFP4-LLM/sorting_index/Meta-Llama-3-8B-sorted_idx.pt
+sorting_transform=none #/home/shaoyuantian/program/MXFP4-LLM/sorting_index/Meta-Llama-3-8B-sorted_idx.pt
 group_rotate_kv=false
 kv_quant_only=true
 kv_tokenwise=true
-gptq=false
-gptq_percdamp=0.01
-gptq_cal_dataset=wikitext2
-gptq_cal_nsamples=128
 
 for model in $2
 do
-for scale_bits in 8
+for scale_bits in 16
 do
 scale_bits_linear=$scale_bits
 scale_bits_matmul=$scale_bits
 for per_tensor in false
 do
-for block_size in 16
+for block_size in 32
 do
 block_size_linear=$block_size
 block_size_matmul=$block_size
 for format in none #int4
 do
-w_elem_format_linear=$format
+w_elem_format_linear=int4 # $format
 A_elem_format_matmul=$format
-a_elem_format_linear=fp4_e2m1 # $format
+a_elem_format_linear=$format
 B_elem_format_matmul=$format
-for scale_mode in 152
+for scale_mode in 2
 do
 w_scale_mode=$scale_mode
 A_scale_mode=$scale_mode
 a_scale_mode=$scale_mode
 B_scale_mode=$scale_mode
 
-CUDA_VISIBLE_DEVICES=$1 python main.py \
+CUDA_VISIBLE_DEVICES=$1 python main_test.py \
     --model=$model \
     --seed=$seed \
     --tasks=$tasks \
@@ -121,9 +118,9 @@ CUDA_VISIBLE_DEVICES=$1 python main.py \
     --kv_quant_only=$kv_quant_only \
     --kv_tokenwise=$kv_tokenwise \
     --gptq=$gptq \
-    --gptq_percdamp=$gptq_percdamp \
-    --gptq_cal_dataset=$gptq_cal_dataset \
-    --gptq_cal_nsamples=$gptq_cal_nsamples
+    --gptq_percdamp=0.01 \
+    --gptq_cal_dataset=wikitext2 \
+    --gptq_cal_nsamples=128
 done
 done
 done

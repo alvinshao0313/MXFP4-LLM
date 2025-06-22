@@ -24,8 +24,49 @@ from lm_eval import evaluator
 import warnings
 import logging
 import pprint
+import math
 from accelerate import Accelerator
 warnings.filterwarnings('ignore')
+
+try:
+    from scale_utils import hadamard_utils
+    import fast_hadamard_transform
+except:
+    print('hadamard_utils is not imported')
+
+
+def rotate_hook(rotate_mode):
+    def hook(module, inp):
+        # Hadamard transform (QuaRot)
+        if rotate_mode.get("online_full_had", False):
+            inp[0].data = hadamard_utils.matmul_hadU_cuda(
+                inp[0].data, rotate_mode["had_K"], rotate_mode["K"])
+        elif rotate_mode.get("online_partial_had", False):
+            init_shape = inp[0].shape
+            if rotate_mode["K"] == 1:
+                inp[0].data = fast_hadamard_transform.hadamard_transform(
+                    inp[0].data.reshape(-1, init_shape[-1] // rotate_mode["had_dim"],
+                                        rotate_mode["had_dim"]).transpose(1, 2),
+                    scale=1 /
+                    math.sqrt(
+                        init_shape[-1] // rotate_mode["had_dim"])
+                ).transpose(1, 2)
+            else:
+                inp[0].data = (rotate_mode["had_K"].to(inp[0].dtype).to(inp[0].device) @ inp[0].data.reshape(-1,
+                                                                                                             init_shape[-1] // rotate_mode["had_dim"], rotate_mode["had_dim"])) / math.sqrt(init_shape[-1] // rotate_mode["had_dim"])
+            inp[0].data = inp[0].data.reshape(init_shape)
+        elif rotate_mode.get("online_group_had", False):
+            assert rotate_mode["had_dim"] > 0 and rotate_mode[
+                "K"] == 1, "Group Hadamard transform requires had_dim > 0 and K == 1"
+            # Group Hadamard transform
+            init_shape = inp[0].shape
+            inp[0].data = fast_hadamard_transform.hadamard_transform(
+                inp[0].data.reshape(-1, init_shape[-1] //
+                                    rotate_mode["had_dim"], rotate_mode["had_dim"]),
+                scale=1 / math.sqrt(rotate_mode["had_dim"]))
+            inp[0].data = inp[0].data.reshape(init_shape)
+        return inp
+    return hook
 
 
 def main(args):
@@ -56,46 +97,51 @@ def main(args):
         args.model, trust_remote_code=True, use_fast=False)
 
     # ============================ MX format
-    mx_specs_linear = parse_mx_specs(args, 'linear')
-    mx_specs_matmul = parse_mx_specs(args, 'matmul')
-    mx_specs_ln = parse_mx_specs(args, 'ln')
-    mx_specs_head = parse_mx_specs(args, 'head')
-    get_mx_model(
-        model.eval(),
-        mx_specs_linear=mx_specs_linear,
-        mx_specs_matmul=mx_specs_matmul,
-        mx_specs_ln=mx_specs_ln,
-        mx_specs_head=mx_specs_head,
-        args=args,
-    )
-    gptq_mx_specs_linear = parse_mx_specs(args, 'linear')
-    gptq_mx_specs_linear
+    # mx_specs_linear = parse_mx_specs(args, 'linear')
+    # mx_specs_matmul = parse_mx_specs(args, 'matmul')
+    # mx_specs_ln = parse_mx_specs(args, 'ln')
+    # mx_specs_head = parse_mx_specs(args, 'head')
+    # get_mx_model(
+    #     model.eval(),
+    #     mx_specs_linear=mx_specs_linear,
+    #     mx_specs_matmul=mx_specs_matmul,
+    #     mx_specs_ln=mx_specs_ln,
+    #     mx_specs_head=mx_specs_head,
+    #     args=args,
+    # )
+    # gptq_mx_specs_linear = parse_mx_specs(args, 'linear')
+    # gptq_mx_specs_linear
 
     # ============================ Runtime Hadamard Transform for QuaRot
     if args.rotate:
         from scale_utils import hadamard_utils
+        rotate_handles = []
         if 'llama' in args.model or 'mistral' in args.model:
-            for name, module in model.named_modules():
+            for name, mod in model.named_modules():
+                rotate_mode = {}
                 if 'down_proj' in name:
                     if args.rotate_mode == 'hadamard':
                         had_K, K = hadamard_utils.get_hadK(
                             model.config.intermediate_size)
-                        setattr(module, "online_full_had", True)
+                        rotate_mode["online_full_had"] = True
                     elif args.rotate_mode == 'group_hadamard':
                         had_K, K = hadamard_utils.get_hadK(
                             args.block_size_linear)
-                        setattr(module, "online_group_had", True)
-                        setattr(module, "had_dim", args.block_size_linear)
-                    setattr(module, "had_K", had_K)
-                    setattr(module, "K", K)
-                if 'o_proj' in name and args.online_partial_had:
+                        rotate_mode["online_group_had"] = True
+                        rotate_mode["had_dim"] = args.block_size_linear
+                    rotate_mode["had_K"] = had_K
+                    rotate_mode["K"] = K
+                    rotate_handles.append(mod.register_forward_pre_hook(
+                        rotate_hook(rotate_mode)))
+                elif 'o_proj' in name and args.online_partial_had:
                     had_K, K = hadamard_utils.get_hadK(
                         model.config.num_attention_heads)
-                    setattr(module, "online_partial_had", True)
-                    setattr(module, "had_K", had_K)
-                    setattr(module, "K", K)
-                    setattr(module, "had_dim", model.config.hidden_size //
-                            model.config.num_attention_heads)
+                    rotate_mode["online_partial_had"] = True
+                    rotate_mode["had_K"] = had_K
+                    rotate_mode["K"] = K
+                    rotate_mode["had_dim"] = model.config.hidden_size // model.config.num_attention_heads
+                    rotate_handles.append(mod.register_forward_pre_hook(
+                        rotate_hook(rotate_mode)))
         else:
             raise NotImplementedError
 

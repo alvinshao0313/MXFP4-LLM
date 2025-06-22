@@ -45,7 +45,7 @@ def str2int(v):
 
 
 def str2path(v):
-    if v.lower() in ('none'):
+    if v is None or v.lower() in ('none'):
         return None
     else:
         return str(v)

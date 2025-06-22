@@ -1,7 +1,6 @@
 from scale_utils import model_utils
 import torch
 import typing
-import utils
 import transformers
 import tqdm
 import math
@@ -211,10 +210,11 @@ def rotate_mlp_input(layer, Q, model_type, **kwargs):
     for W in mlp_inputs:
         dtype = W.weight.dtype
         W_ = W.weight.data.to(device="cuda:0", dtype=torch.float64)
-        W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
+        W.weight.data = torch.matmul(W_, Q)
         if kwargs.get('reflow', False):
             # Reflow the weights if sorting transform is applied.
             W.weight.data = W.weight.data[kwargs["sorting_idx"], :]
+        W.weight.data = W.weight.data.to(device="cpu", dtype=dtype)
 
 
 def rotate_mlp_output(layer, Q, model_type, args, **kwargs):
@@ -231,7 +231,7 @@ def rotate_mlp_output(layer, Q, model_type, args, **kwargs):
         raise ValueError(f'Unknown model type {model_type}')
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device="cuda:0", dtype=torch.float64)
-    W.weight.data = torch.matmul(Q.T, W_).to(device="cpu", dtype=dtype)
+    W.weight.data = torch.matmul(Q.T, W_)
     if args.rotate_mode == 'hadamard':
         # apply exact (inverse) hadamard on the weights of mlp output
         apply_exact_had_to_linear(W, had_dim=-1, output=False)
@@ -244,6 +244,7 @@ def rotate_mlp_output(layer, Q, model_type, args, **kwargs):
             W_ = W_[:, kwargs["sorting_idx"]]
         W.weight.data = hadamard_transform(W_.reshape(-1, init_shape[-1] // had_dim,
                                                       had_dim), scale=1 / math.sqrt(had_dim)).reshape(init_shape)
+    W.weight.data = W.weight.data.to(device="cpu", dtype=dtype)
     if W.bias is not None:
         b = W.bias.data.to(device="cuda:0", dtype=torch.float64)
         W.bias.data = torch.matmul(Q.T, b).to(device="cpu", dtype=dtype)
@@ -333,7 +334,7 @@ def apply_multi_head_rotate(module, Q, head_dim, head_num, output=False, **kwarg
             n_rep = init_shape[1] // (head_dim * head_num)
             W_ = W_.reshape(init_shape[0], head_num, n_rep, head_dim).transpose(1, 2).reshape(
                 init_shape[0], n_rep, -1)[:, :, kwargs['sorting_idx']]
-            W_ = W_.reshape(init_shape[0], n_rep, head_num, head_dim).transpose(0, 1).reshape(init_shape)
+            W_ = W_.reshape(init_shape[0], n_rep, head_num, head_dim).transpose(1, 2).reshape(init_shape)
         W_ = W_.reshape(-1, init_shape[1] // head_dim,
                         head_dim).transpose(0, 1)
         W_ = torch.matmul(W_, Q)
@@ -358,7 +359,8 @@ def rotate_model(model, args):
         s_Q1 = torch.eye(model.config.hidden_size, device="cuda:0", dtype=torch.float64)[:, sorted_idx]
         Q1 = s_Q1 @ Q1
         del s_Q1
-    Q2 = get_orthogonal_matrix(head_dim, args.rotate_mode, device="cuda:0", **kwargs)
+    Q2 = get_orthogonal_matrix(head_dim, args.rotate_mode, device="cuda:0", **
+                               kwargs) if not args.online_partial_had else None
     # Q1 = get_orthogonal_matrix(model.config.hidden_size, 'hadamard', device="cuda:0")
     # Q2 = get_orthogonal_matrix(head_dim, 'hadamard', device="cuda:0")
 
@@ -383,7 +385,7 @@ def rotate_model(model, args):
         })
         rotate_ov_proj(layers[idx], model_type, kv_head, head_dim, args,
                        **{
-            'Q2': Q2 if not args.online_partial_had else None,
+            'Q2': Q2,
             'sorting_idx': sorting_transforms[f"model.layers.{idx}.self_attn.R2"] if args.sorting_transform else None,
             'reflow': True if args.sorting_transform else False
         })

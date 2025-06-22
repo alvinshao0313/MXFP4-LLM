@@ -52,7 +52,7 @@ from transformers.utils import check_min_version, is_offline_mode, send_example_
 from transformers.utils.versions import require_version
 
 # MX
-from utils.mx import parse_mx_specs, get_mx_model
+from utils.mx import parse_mx_specs, get_gptq_model
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.36.0")
@@ -536,7 +536,7 @@ def main():
     mx_specs_matmul=parse_mx_specs(quant_args,'matmul')
     mx_specs_ln=parse_mx_specs(quant_args,'ln')
     mx_specs_head=parse_mx_specs(quant_args,'head')
-    get_mx_model(
+    get_gptq_model(
         model.eval(),
         mx_specs_linear=mx_specs_linear,
         mx_specs_matmul=mx_specs_matmul,

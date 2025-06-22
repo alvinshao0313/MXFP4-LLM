@@ -186,3 +186,175 @@ torch::Tensor quantize_mx_by_tile_cuda(
     gpuErrchk(cudaPeekAtLastError());
     return output;
 }
+
+
+//-----------------------------------------------------------------------
+// get_mx_quantize_param_by_tile_cuda
+//-----------------------------------------------------------------------
+std::vector<torch::Tensor> get_mx_quantize_param_by_tile_cuda(
+    const torch::Tensor input,
+    const int scale_bits,
+    int elem_ebits,
+    int elem_mbits,
+    float elem_max_norm,
+    const int tile_size,
+    const int axis,
+    const bool flush_fp32_subnorms = false,
+    const RoundingMode rounding_mode = rd_away,
+    const int scale_mode = 0,
+    const int asym = -1
+) {
+    at::Device device = input.device();
+    const at::cuda::CUDAGuard device_guard{device};
+
+    const int ndim = input.dim();
+    auto input_sizes = input.sizes();
+
+    // 计算维度信息
+    const int axis_size = input_sizes[axis];
+    int tsize = (tile_size > 0) ? tile_size : axis_size;
+    
+    long pre_axis_size = 1;
+    for (int i = 0; i < axis; i++) {
+        pre_axis_size *= input_sizes[i];
+    }
+    
+    long post_axis_size = 1;
+    for (int i = axis + 1; i < ndim; i++) {
+        post_axis_size *= input_sizes[i];
+    }
+    
+    int num_tiles = axis_size / tsize;
+    if (axis_size % tsize) {
+        num_tiles += 1;
+    }
+
+    const long total_tiles = pre_axis_size * num_tiles * post_axis_size;
+
+    // 创建输出张量
+    auto scales_shape = std::vector<long>{total_tiles};
+    auto shifts_shape = std::vector<long>{total_tiles};
+    
+    // 对于某些非对称量化模式，可能需要更大的输出张量
+    if (asym == 1) {
+        scales_shape[0] = total_tiles * 2; // 存储正负缩放因子
+    }
+    
+    auto scales1 = torch::zeros(scales_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    auto scales2 = torch::zeros(scales_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    auto shifts = torch::zeros(shifts_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+    // 计算 CUDA 网格和块配置
+    const long blocks = get_blocks(total_tiles);
+    const int threads = get_threads(total_tiles);
+
+    // 调用 CUDA 内核
+    if (input.dtype() == torch::ScalarType::Half) {
+        AT_ASSERTM(0, " fp16 not supported for MX");
+    } else {
+        get_mx_quantize_param_by_tile_cuda_kernel<<<blocks, threads>>>(
+            input.data_ptr<float>(),
+            scale_bits,
+            elem_ebits,
+            elem_mbits,
+            elem_max_norm,
+            total_tiles,
+            tsize,
+            num_tiles,
+            axis_size,
+            post_axis_size,
+            flush_fp32_subnorms,
+            rounding_mode,
+            scale_mode,
+            asym,
+            scales1.data_ptr<float>(),
+            scales2.data_ptr<float>(),
+            shifts.data_ptr<float>()
+        );
+    }
+
+    gpuErrchk(cudaPeekAtLastError());
+    
+    return {scales1, scales2, shifts};
+}
+
+
+//-----------------------------------------------------------------------
+// apply_mx_quantize_with_param_cuda
+//-----------------------------------------------------------------------
+torch::Tensor apply_mx_quantize_with_param_cuda(
+    const torch::Tensor input,
+    const torch::Tensor scales1,
+    const torch::Tensor scales2,
+    const torch::Tensor shifts,
+    int elem_ebits,
+    int elem_mbits,
+    float elem_max_norm,
+    const int tile_size,
+    const int axis,
+    const bool flush_fp32_subnorms = false,
+    const RoundingMode rounding_mode = rd_away,
+    const int scale_mode = 0,
+    const int asym = -1
+) {
+    at::Device device = input.device();
+    const at::cuda::CUDAGuard device_guard{device};
+    auto output = torch::empty_like(input);
+    output = output.to(device);
+
+    const int ndim = input.dim();
+    auto input_sizes = input.sizes();
+
+    // 计算维度信息
+    const int axis_size = input_sizes[axis];
+    int tsize = (tile_size > 0) ? tile_size : axis_size;
+    
+    long pre_axis_size = 1;
+    for (int i = 0; i < axis; i++) {
+        pre_axis_size *= input_sizes[i];
+    }
+    
+    long post_axis_size = 1;
+    for (int i = axis + 1; i < ndim; i++) {
+        post_axis_size *= input_sizes[i];
+    }
+    
+    int num_tiles = axis_size / tsize;
+    if (axis_size % tsize) {
+        num_tiles += 1;
+    }
+
+    const long total_tiles = pre_axis_size * num_tiles * post_axis_size;
+
+    // 计算 CUDA 网格和块配置
+    const long blocks = get_blocks(total_tiles);
+    const int threads = get_threads(total_tiles);
+
+    // 调用 CUDA 内核
+    if (input.dtype() == torch::ScalarType::Half) {
+        AT_ASSERTM(0, " fp16 not supported for MX");
+    } else {
+        apply_mx_quantize_with_param_cuda_kernel<<<blocks, threads>>>(
+            input.data_ptr<float>(),
+            scales1.data_ptr<float>(),
+            scales2.data_ptr<float>(),
+            shifts.data_ptr<float>(),
+            elem_ebits,
+            elem_mbits,
+            elem_max_norm,
+            total_tiles,
+            tsize,
+            num_tiles,
+            axis_size,
+            post_axis_size,
+            flush_fp32_subnorms,
+            rounding_mode,
+            scale_mode,
+            asym,
+            output.data_ptr<float>()
+        );
+    }
+
+    gpuErrchk(cudaPeekAtLastError());
+    return output;
+}

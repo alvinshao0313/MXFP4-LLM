@@ -196,3 +196,4 @@ cython_debug/
 
 log/
 *.cache
+sorting_index/

@@ -1,7 +1,6 @@
 import torch
 import typing
 import transformers
-import utils
 import os
 import logging
 
@@ -27,9 +26,11 @@ def model_type_extractor(model):
     else:
         raise ValueError(f'Unknown model type {model}')
 
+
 def skip(*args, **kwargs):
-    # This is a helper function to save time during the initialization! 
+    # This is a helper function to save time during the initialization!
     pass
+
 
 def get_rope_function_name(model):
     if isinstance(model, LLAMA_MODEL):
@@ -116,6 +117,7 @@ def get_model_type(model):
         raise ValueError(f'Unknown model type {model}')
     return model_type
 
+
 def get_embeddings(model, model_type) -> list[torch.nn.Module]:
     if model_type == LLAMA_MODEL:
         return [model.model.embed_tokens]
@@ -154,6 +156,7 @@ def get_lm_head(model, model_type):
     else:
         raise ValueError(f'Unknown model type {model_type}')
 
+
 def get_pre_head_layernorm(model, model_type):
     if model_type == LLAMA_MODEL:
         pre_head_layernorm = model.model.norm
@@ -174,6 +177,7 @@ def get_pre_head_layernorm(model, model_type):
         raise ValueError(f'Unknown model type {model_type}')
     return pre_head_layernorm
 
+
 def get_mlp_bottleneck_size(model):
     model_type = get_model_type(model)
     if model_type == LLAMA_MODEL:
@@ -186,6 +190,7 @@ def get_mlp_bottleneck_size(model):
         return model.config.ffn_dim
     else:
         raise ValueError(f'Unknown model type {model_type}')
+
 
 def replace_modules(
     root: torch.nn.Module,
@@ -240,6 +245,7 @@ class RMSN(torch.nn.Module):
         x = x * torch.rsqrt(variance + self.eps)
         return x.to(input_dtype)
 
+
 class Qwen2RMSN(torch.nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
@@ -253,8 +259,10 @@ class Qwen2RMSN(torch.nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return hidden_states.to(input_dtype)
 
+
 def get_layer_io_save_path(args):
     return os.path.join(args.save_path, 'layer_io', f'{args.layer_idx:03d}.pt')
+
 
 def capture_layer_io(model_type, layer, layer_input):
     def hook_factory(module_name, captured_vals, is_input):
@@ -312,7 +320,7 @@ def capture_layer_io(model_type, layer, layer_input):
     # Process each sequence in the batch one by one to avoid OOM.
     for seq_idx in range(layer_input.shape[0]):
         # Extract the current sequence across all dimensions.
-        seq = layer_input[seq_idx:seq_idx + 1].to(utils.DEV)
+        seq = layer_input[seq_idx:seq_idx + 1].to("cuda:0")
         # Perform a forward pass for the current sequence.
         layer(seq)
 

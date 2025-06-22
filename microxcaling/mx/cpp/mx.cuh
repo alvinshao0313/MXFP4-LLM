@@ -699,4 +699,377 @@ __global__ void quantize_mx_by_tile_cuda_kernel (
     }
 }
 
+
+//-----------------------------------------------------------------------
+// get_quantize_param_mx_by_tile kernel
+// 返回每个 tile 的量化参数（scale 和 shift）
+//-----------------------------------------------------------------------
+template<typename T>
+__global__ void get_mx_quantize_param_by_tile_cuda_kernel (
+    const T* __restrict__ in,
+    const int scale_bits,
+    int elem_ebits,
+    int elem_mbits,
+    float elem_max_norm,
+    const int total_tiles,
+    const int tile_size,
+    const int num_tiles,
+    const int axis_size,
+    const int post_axis_size,
+    const bool flush_fp32_subnorms,
+    const RoundingMode rounding_mode,
+    const int scale_mode,
+    const int asym,
+    T* __restrict__ scales_out1,     // 输出 scale 参数
+    T* __restrict__ scales_out2,     // 输出 scale2 参数
+    T* __restrict__ shifts_out      // 输出 shift 参数（用于非对称量化）
+) {
+    const long offset = blockDim.x * blockIdx.x + threadIdx.x;
+    if (offset >= total_tiles) return;
+
+    // 计算不同维度上的索引
+    const long post_axis_i = offset % post_axis_size;
+    const long num_tiles_i = (offset / post_axis_size) % num_tiles;
+    const long pre_axis_i = offset / (num_tiles * post_axis_size);
+
+    // 处理不完整的 tile
+    int adjusted_tile_size;
+    if ((num_tiles_i + 1) * tile_size > axis_size) {
+        adjusted_tile_size = axis_size % tile_size;
+    } else {
+        adjusted_tile_size = tile_size;
+    }
+
+    if (asym >= 0) { 
+        if (asym == 0) { // 整数非对称量化
+            float max_ = 0;
+            float min_ = 0;
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+                max_ = (in[in_i] > max_) ? in[in_i] : max_;
+                min_ = (in[in_i] < min_) ? in[in_i] : min_;
+            }
+            float scale = (max_ - min_) / ((1 << elem_mbits) - 1);
+            scale = (scale == 0) ? 1 : scale;
+            float shift = -1 * (round(min_ / scale)) - (1 << (elem_mbits - 1));
+            
+            scales_out1[offset] = scale;
+            scales_out2[offset] = 0; 
+            shifts_out[offset] = shift;
+            
+        } else if (asym == 3) { // 整数非对称量化 PoT
+            float max_ = 0;
+            float min_ = 0;
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+                max_ = (in[in_i] > max_) ? in[in_i] : max_;
+                min_ = (in[in_i] < min_) ? in[in_i] : min_;
+            }
+            float scale = (max_ - min_) / ((1 << elem_mbits) - 1);
+            scale = (scale == 0) ? 1 : scale;
+            scale = (scale_mode == 3) ? powf(2.0f, roundf(log2f(scale))) : powf(2.0f, floorf(log2f(scale)));
+            float shift = -1 * (round(min_ / scale)) - (1 << (elem_mbits - 1));
+            
+            scales_out1[offset] = scale;
+            scales_out2[offset] = 0; 
+            shifts_out[offset] = shift;
+            
+        } else if (asym == 1) { // 浮点非对称量化
+            float max_ = 0;
+            float min_ = 0;
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+                max_ = (in[in_i] > max_) ? in[in_i] : max_;
+                min_ = (in[in_i] < min_) ? in[in_i] : min_;
+            }
+            float scale_pos = max_ / elem_max_norm;
+            float scale_neg = fabsf(min_) / elem_max_norm;
+            scale_pos = (scale_pos == 0) ? 1 : scale_pos;
+            scale_neg = (scale_neg == 0) ? 1 : scale_neg;
+            
+            // 对于非对称浮点量化，我们存储正负缩放因子
+            // 可以用两个输出张量分别存储，或者交替存储
+            scales_out1[offset] = scale_pos;      // 正值缩放因子
+            scales_out2[offset] = scale_neg;  // 负值缩放因子
+            shifts_out[offset] = 0;                  // 浮点量化通常不使用 shift
+            
+        } else if (asym==2) {
+            float max_ = 0;
+            float min_ = 0;
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+                max_ = (in[in_i] > max_) ? in[in_i] : max_;
+                min_ = (in[in_i] < min_) ? in[in_i] : min_;
+            }
+            int shared_exp_pos = get_biased_exponent(max_);
+            int shared_exp_neg = get_biased_exponent(min_);
+            // Loop over bounding box to quantize
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+                int shared_exp = (in[in_i]>0) ? shared_exp_pos : shared_exp_neg;
+                if (scale_mode==3) { // Ceil if necessary
+                    int threshold = 0x7FFFFF;
+                    threshold >>= (24 - elem_mbits);
+                    threshold <<= (24 - elem_mbits);
+                    int mantissa = (in[in_i]>0) ? (*(int*)&max_ & 0x7FFFFF) : (*(int*)&min_ & 0x7FFFFF);
+                    if (mantissa >= threshold) {
+                        shared_exp += 1;
+                    }
+                }
+                float scale = mx_get_shared_scale(
+                      shared_exp, scale_bits, elem_max_norm);
+        
+                scales_out1[offset] = scale;
+                scales_out2[offset] = 0;  // 不使用 scale2
+                shifts_out[offset] = 0;  // 不使用 shift
+            }
+        } else if (asym==4) {
+            float max_ = 0;
+            float min_ = 0;
+            float max_val = 0;
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+                max_ = (in[in_i] > max_) ? in[in_i] : max_;
+                min_ = (in[in_i] < min_) ? in[in_i] : min_;
+                max_val = (fabsf(in[in_i]) > max_val) ? fabsf(in[in_i]) : max_val;
+            }
+            int shared_exp_pos = get_biased_exponent(max_);
+            int shared_exp_neg = get_biased_exponent(min_);
+            int raw_mantissa = 0;
+            float mantissa = 1.0;
+            if (scale_mode==11) {
+                raw_mantissa = (*(int*)&max_val & 0x600000) >> 21;
+                mantissa = 1.0 + (float)raw_mantissa / 4.0;
+            } else if (scale_mode==111) {
+                raw_mantissa = (*(int*)&max_val & 0x700000) >> 20;
+                mantissa = 1.0 + (float)raw_mantissa / 8.0;
+            } else if (scale_mode==1111) {
+                raw_mantissa = (*(int*)&max_val & 0x780000) >> 19;
+                mantissa = 1.0 + (float)raw_mantissa / 16.0;
+            } else if (scale_mode==11111) {
+                raw_mantissa = (*(int*)&max_val & 0x7C0000) >> 18;
+                mantissa = 1.0 + (float)raw_mantissa / 32.0;
+            } else if (scale_mode==111111) {
+                raw_mantissa = (*(int*)&max_val & 0x7E0000) >> 17;
+                mantissa = 1.0 + (float)raw_mantissa / 64.0;
+            } else if (scale_mode==1111111) {
+                raw_mantissa = (*(int*)&max_val & 0x7F0000) >> 16;
+                mantissa = 1.0 + (float)raw_mantissa / 128.0;
+            }
+            // Loop over bounding box to quantize
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+                int shared_exp = (in[in_i]>0) ? shared_exp_pos : shared_exp_neg;
+                float scale = mx_get_shared_scale(
+                      shared_exp, scale_bits, elem_max_norm);
+                scale = scale*mantissa;
+                scales_out1[offset] = scale;
+                scales_out2[offset] = 0;  // 不使用 scale
+                shifts_out[offset] = 0;  // 不使用 shift
+            }
+        }
+    } else { // 对称量化
+        int shared_exp = 0;
+        float max_val = 0;
+        for (int i = 0; i < adjusted_tile_size; i++) {
+            long in_i = pre_axis_i * axis_size * post_axis_size +
+                (num_tiles_i * tile_size + i) * post_axis_size +
+                post_axis_i;
+
+            int exp = get_biased_exponent(in[in_i]);
+            shared_exp = (exp > shared_exp) ? exp : shared_exp;
+            max_val = (fabsf(in[in_i]) > max_val) ? fabsf(in[in_i]) : max_val;
+        }
+
+        bool flush_tile = (shared_exp == 0 && flush_fp32_subnorms);
+
+        // 计算共享缩放因子
+        if (scale_mode == 1) {
+            int threshold = 0;
+            int mantissa = (*(int*)&max_val & 0x7FFFFF);
+            if (mantissa > threshold) {
+                shared_exp += 1;
+            }
+            shared_exp += 1;
+        }
+        if (scale_mode == 3) {
+            int threshold = 0x7FFFFF;
+            threshold >>= (24 - elem_mbits);
+            threshold <<= (24 - elem_mbits);
+            int mantissa = (*(int*)&max_val & 0x7FFFFF);
+            if (mantissa >= threshold) {
+                shared_exp += 1;
+            }
+        }
+        
+        float scale = 1;
+        if (scale_mode == 2) {
+            scale = max_val / elem_max_norm;
+            scale = (scale == 0) ? 1 : scale;
+        } else if (scale_mode == 143) {
+            scale = max_val / elem_max_norm;
+            scale = quantize_elemwise(
+                    scale, 5, 4, 480,
+                    rounding_mode, true, true);
+            scale = (scale == 0) ? 1 : scale;
+        } else if (scale_mode == 152) {
+            scale = max_val / elem_max_norm;
+            scale = quantize_elemwise(
+                    scale, 4, 5, 57344.0,
+                    rounding_mode, true, true);
+        } else {
+            scale = mx_get_shared_scale(
+                  shared_exp, scale_bits, elem_max_norm);
+        }
+
+        scales_out1[offset] = flush_tile ? 0 : scale;
+        scales_out2[offset] = 0;  // 对称量化不使用 scale2
+        shifts_out[offset] = 0;  // 对称量化不使用 shift
+    }
+}
+
+//-----------------------------------------------------------------------
+// apply_mx_quantize_with_param kernel
+// 使用预计算的量化参数进行量化
+//-----------------------------------------------------------------------
+template<typename T>
+__global__ void apply_mx_quantize_with_param_cuda_kernel (
+    const T* __restrict__ in,
+    const T* __restrict__ scales1,
+    const T* __restrict__ scales2,
+    const T* __restrict__ shifts,
+    int elem_ebits,
+    int elem_mbits,
+    float elem_max_norm,
+    const int total_tiles,
+    const int tile_size,
+    const int num_tiles,
+    const int axis_size,
+    const int post_axis_size,
+    const bool flush_fp32_subnorms,
+    const RoundingMode rounding_mode,
+    const int scale_mode,
+    const int asym,
+    T* __restrict__ out
+) {
+    const long offset = blockDim.x * blockIdx.x + threadIdx.x;
+    if (offset >= total_tiles) return;
+
+    // 计算不同维度上的索引
+    const long post_axis_i = offset % post_axis_size;
+    const long num_tiles_i = (offset / post_axis_size) % num_tiles;
+    const long pre_axis_i = offset / (num_tiles * post_axis_size);
+
+    // 处理不完整的 tile
+    int adjusted_tile_size;
+    if ((num_tiles_i + 1) * tile_size > axis_size) {
+        adjusted_tile_size = axis_size % tile_size;
+    } else {
+        adjusted_tile_size = tile_size;
+    }
+
+    // 获取当前 tile 的量化参数
+    const float scale1 = scales1[offset];
+    const float scale2 = scales2[offset];
+    const float shift = shifts[offset];
+
+    if (asym >= 0) { 
+        if (asym == 0) { // 整数非对称量化
+            // Loop over bounding box to quantize
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+
+                T scaled_in = in[in_i] / scale1 + shift;
+                T scaled_out = round(scaled_in);
+                out[in_i] = (scaled_out - shift) * scale1;
+            }
+        } else if (asym == 3) { // 整数非对称量化 PoT
+            T max_clip = (1 << (elem_mbits - 1)) - 1; // -8~7
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+
+                T scaled_in = in[in_i] / scale1 + shift;
+                T scaled_out = round(scaled_in);
+                scaled_out = fmaxf(0, fminf(max_clip, scaled_out));
+                out[in_i] = (scaled_out - shift) * scale1;
+            }
+        } else if (asym == 1) { // 浮点非对称量化
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+
+                // 根据输入值的符号选择对应的缩放因子
+                float scale = (in[in_i] > 0) ? scale1 : scale2;
+                
+                // 可选的缩放因子量化
+                if (scale_mode == 143) {
+                    scale = quantize_elemwise(
+                            scale, 5, 4, 480,
+                            rounding_mode, true, true);
+                    scale = (scale == 0) ? 1 : scale;
+                } else if (scale_mode == 152) {
+                    scale = quantize_elemwise(
+                            scale, 4, 5, 57344.0,
+                            rounding_mode, true, true);
+                }
+
+                T scaled_in = in[in_i] / scale;
+                T scaled_out = quantize_elemwise(
+                        scaled_in, elem_mbits, elem_ebits, elem_max_norm,
+                        rounding_mode, true, true);
+                out[in_i] = scaled_out * scale;
+            }
+        } else if (asym == 2 || asym == 4) { // 浮点非对称量化 PoT
+            for (int i = 0; i < adjusted_tile_size; i++) {
+                long in_i = pre_axis_i * axis_size * post_axis_size +
+                    (num_tiles_i * tile_size + i) * post_axis_size +
+                    post_axis_i;
+
+                // 对于 asym==2 和 asym==4，scale1 已经包含了所有必要的信息
+                T scaled_in = in[in_i] / scale1;
+                T scaled_out = quantize_elemwise(
+                        scaled_in, elem_mbits, elem_ebits, elem_max_norm,
+                        rounding_mode, true, true);
+                out[in_i] = scaled_out * scale1;
+            }
+        }
+    } else { // 对称量化
+        bool flush_tile = (scale1 == 0 && flush_fp32_subnorms);
+
+        // Loop over bounding box to quantize
+        for (int i = 0; i < adjusted_tile_size; i++) {
+            long in_i = pre_axis_i * axis_size * post_axis_size +
+                (num_tiles_i * tile_size + i) * post_axis_size +
+                post_axis_i;
+
+            T scaled_in = (flush_tile) ? 0 : in[in_i] / scale1;
+
+            T scaled_out = quantize_elemwise(
+                    scaled_in, elem_mbits, elem_ebits, elem_max_norm,
+                    rounding_mode, true, true);
+
+            out[in_i] = scaled_out * scale1;
+        }
+    }
+}
+
 #endif

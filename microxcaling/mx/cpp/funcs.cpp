@@ -230,6 +230,60 @@ torch::Tensor reduce_max_inner_dim_cuda(
     return reduce_max_inner_dim(A);
 }
 
+std::vector<torch::Tensor> get_mx_quantize_param_by_tile_func_cuda(
+    torch::Tensor A,
+    int scale_bits,
+    int elem_ebits,
+    int elem_mbits,
+    float elem_max_norm,
+    int tile_size,
+    int axis,
+    const bool flush_fp32_subnorms,
+    const int rmode,
+    const int scale_mode,
+    const int asym
+) {
+    CHECK_INPUT(A);
+    AT_ASSERTM(axis < A.dim(), " get_quantize_param_mx_by_tile axis exceeds input dimensions");
+
+    // 转换舍入模式
+    RoundingMode rounding_mode = static_cast<RoundingMode>(rmode);
+
+    return get_mx_quantize_param_by_tile_cuda(
+        A, scale_bits, elem_ebits, elem_mbits, elem_max_norm,
+        tile_size, axis, flush_fp32_subnorms, rounding_mode, scale_mode, asym);
+}
+
+torch::Tensor apply_mx_quantize_with_param_func_cuda(
+    torch::Tensor A,
+    torch::Tensor scales1,
+    torch::Tensor scales2,
+    torch::Tensor shifts,
+    int elem_ebits,
+    int elem_mbits,
+    float elem_max_norm,
+    int tile_size,
+    int axis,
+    const bool flush_fp32_subnorms,
+    const int rmode,
+    const int scale_mode,
+    const int asym
+) {
+    CHECK_INPUT(A);
+    CHECK_INPUT(scales1);
+    CHECK_INPUT(scales2);
+    CHECK_INPUT(shifts);
+    AT_ASSERTM(axis < A.dim(), " apply_mx_quantize_with_param axis exceeds input dimensions");
+
+    // 转换舍入模式
+    RoundingMode rounding_mode = static_cast<RoundingMode>(rmode);
+
+    return apply_mx_quantize_with_param_cuda(
+        A, scales1, scales2, shifts, elem_ebits, elem_mbits, elem_max_norm,
+        tile_size, axis, flush_fp32_subnorms, rounding_mode, scale_mode, asym);
+}
+
+
 // Python bindings
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("quantize_mx_func_cpp", &quantize_mx_func_cpp, "MX quantization function in C++");
@@ -239,4 +293,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("quantize_elemwise_func_cuda", &quantize_elemwise_func_cuda, "Element-wise quantization function with CUDA");
     m.def("reduce_sum_inner_dim", &reduce_sum_inner_dim_cuda, "Sum reduction over innermost dim");
     m.def("reduce_max_inner_dim", &reduce_max_inner_dim_cuda, "Max reduction over innermost dim");
+    m.def("get_mx_quantize_param_by_tile_func_cuda", &get_mx_quantize_param_by_tile_func_cuda, 
+        "Get quantization parameters (scale and shift) for MX quantization by tile with CUDA");
+    m.def("apply_mx_quantize_with_param_func_cuda", &apply_mx_quantize_with_param_func_cuda,
+            "Apply MX quantization using pre-computed parameters with CUDA");
 }

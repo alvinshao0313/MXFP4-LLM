@@ -257,7 +257,7 @@ if __name__ == '__main__':
     # Weight Scaling
     parser.add_argument('--rotate', type=str2bool, default=False)
     parser.add_argument('--rotate_mode', type=str, default='hadamard',
-                        choices=['hadamard', 'group_hadamard'])
+                        choices=['hadamard', 'group_hadamard', 'identity'])
     parser.add_argument('--online_partial_had', type=str2bool, default=False)
     parser.add_argument('--sorting_transform', type=str2path, default=None)
     parser.add_argument('--rotate_kv', type=str2bool, default=True)

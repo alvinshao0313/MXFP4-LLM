@@ -153,6 +153,8 @@ def get_orthogonal_matrix(size, mode, device="cuda:0", **kwargs):
         assert kwargs.get('had_dim', False), "had_dim must be specified for group hadamard mode"
         had_dim = kwargs['had_dim']
         return group_hadamard_matrix(size, had_dim, device)
+    elif mode == 'identity':
+        return torch.eye(size, dtype=torch.float64, device=device)
     else:
         raise ValueError(f'Unknown mode {mode}')
 
@@ -232,6 +234,9 @@ def rotate_mlp_output(layer, Q, model_type, args, **kwargs):
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device="cuda:0", dtype=torch.float64)
     W.weight.data = torch.matmul(Q.T, W_)
+    if kwargs.get('reflow', False):
+        # Reflow the weights if sorting transform is applied.
+        W.weight.data = W.weight.data[:, kwargs["sorting_idx"]]
     if args.rotate_mode == 'hadamard':
         # apply exact (inverse) hadamard on the weights of mlp output
         apply_exact_had_to_linear(W, had_dim=-1, output=False)
@@ -239,9 +244,6 @@ def rotate_mlp_output(layer, Q, model_type, args, **kwargs):
         W_ = W.weight.data.to(device="cuda:0", dtype=torch.float32)
         init_shape = W_.shape
         had_dim = args.block_size_linear
-        if kwargs.get('reflow', False):
-            # Reflow the weights if sorting transform is applied.
-            W_ = W_[:, kwargs["sorting_idx"]]
         W.weight.data = hadamard_transform(W_.reshape(-1, init_shape[-1] // had_dim,
                                                       had_dim), scale=1 / math.sqrt(had_dim)).reshape(init_shape)
     W.weight.data = W.weight.data.to(device="cpu", dtype=dtype)

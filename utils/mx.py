@@ -15,7 +15,8 @@ SILENT = True
 def parse_mx_specs(args, mtype):
     mx_specs = MxSpecs()
     keys = ['scale_bits', 'block_size', 'w_elem_format',
-            'a_elem_format', 'A_elem_format', 'B_elem_format']
+            'a_elem_format', 'A_elem_format', 'B_elem_format',
+            'double_quant']
     for key in keys:
         try:
             val = vars(args)[f'{key}_{mtype}']
@@ -91,7 +92,7 @@ def get_mx_model(model,
             raise RuntimeError(f"father module {father_name} not found")
         # Head
         if name == head_name and isinstance(m, nn.Linear):
-            idx = idx+1 if idx != 0 else idx
+            idx = idx + 1 if idx != 0 else idx
             new_m = Linear(m.in_features, m.out_features,
                            m.bias is not None, mx_specs=mx_specs_head, args=args)
             new_m.weight.data = m.weight.data
@@ -101,7 +102,7 @@ def get_mx_model(model,
             setattr(father_module, name[idx:], replace_m)
         # Linear
         elif isinstance(m, (nn.Linear, Linear)) and 'head' not in name:
-            idx = idx+1 if idx != 0 else idx
+            idx = idx + 1 if idx != 0 else idx
             new_m = Linear(m.in_features, m.out_features,
                            m.bias is not None, mx_specs=mx_specs_linear, args=args)
             new_m.weight.data = m.weight.data
@@ -114,7 +115,7 @@ def get_mx_model(model,
             if args.kv_tokenwise:
                 if 'matmul2' in name:
                     axes = [-1, -1]
-            idx = idx+1 if idx != 0 else idx
+            idx = idx + 1 if idx != 0 else idx
             new_m = MXMatMul(mx_specs=mx_specs_matmul, args=args, axes=axes)
             replace_m = new_m
             wrapped_modules[name] = new_m
@@ -130,6 +131,7 @@ def get_mx_model(model,
 
 try:
     from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention
+    # from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention
     IMPORT_QWEN2 = True
 except:
     print(f'Need transformers>=4.37.0 (current: {transformers.__version__})')
@@ -138,24 +140,18 @@ except:
 
 
 def model_with_matmul(model, args=None):
-    if 'qwen' in args.model and 'qwen2' not in args.model:
+    if 'Qwen' in args.model and 'Qwen2' not in args.model:
         qwen_ln = model.transformer.h[0].ln_1.__class__
     else:
         qwen_ln = None
     from utils.attention import llama_forward, opt_forward, qwen_attn, mistral_forward, qwen2_forward, bart_forward
-    from transformers.models.llama.modeling_llama import LlamaAttention, LlamaSdpaAttention
+    from transformers.models.llama.modeling_llama import LlamaAttention
     from transformers.models.opt.modeling_opt import OPTAttention
     from transformers.models.mistral.modeling_mistral import MistralAttention
     from transformers.models.bart.modeling_bart import BartAttention
     for name, module in model.named_modules():
         # LLaMA family
-        if isinstance(module, LlamaSdpaAttention):
-            # Sdpa attention is used in torch 2.1.2 or later
-            # But it supports merged function, making hard to add quantized module
-            logging.info(
-                'Quantized forward using torch.nn.functional.scaled_dot_product_attention is not supported. Please set attn_implementation=eager when you load model')
-            assert NotImplementedError
-        elif isinstance(module, LlamaAttention):
+        if isinstance(module, LlamaAttention):
             setattr(module, "matmul1", matmul_module())
             setattr(module, "matmul2", matmul_module())
             module.forward = MethodType(llama_forward, module)

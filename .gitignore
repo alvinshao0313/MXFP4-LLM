@@ -197,3 +197,5 @@ cython_debug/
 log/
 *.cache
 sorting_index/
+smooth_scales/
+hidden_state_samples/

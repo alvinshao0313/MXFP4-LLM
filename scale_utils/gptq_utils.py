@@ -76,7 +76,7 @@ class WeightQuantizer(torch.nn.Module):
         bf_in = quantize_elemwise_op(
             x.float(), mx_specs=self.mx_specs, round=self.mx_specs["round_output"]
         )
-        self.scale1, self.scale2, self.shift = get_mx_quantize_params(
+        self.scale1, self.scale2, self.shift, _ = get_mx_quantize_params(
             bf_in,
             self.mx_specs,
             elem_format=self.mx_specs['w_elem_format'],
@@ -84,6 +84,9 @@ class WeightQuantizer(torch.nn.Module):
             axes=[-1],
             round=self.mx_specs["round_mx_output"],
         )
+        self.scale1 = self.scale1[:, 0]
+        self.scale2 = self.scale2[:, 0]
+        self.shift = self.shift[:, 0]
         return
 
     def ready(self):
@@ -115,7 +118,7 @@ class GPTQ:
 
     def fasterquant(
         self, blocksize=128, groupsize=-1,
-        percdamp=.01, actorder=False,
+        percdamp=.01, actorder=False
     ):
         W = self.layer.weight.data.clone()
         W = W.float()
@@ -167,28 +170,21 @@ class GPTQ:
                 q = self.quantizer(w.unsqueeze(0)).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
-
                 err1 = (w - q) / d
-                W1[:,
-                    i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
-
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         torch.cuda.synchronize()
-
         if actorder:
             Q = Q[:, invperm]
         self.layer.weight.data = Q.reshape(
             self.layer.weight.shape).to(self.layer.weight.data.dtype)
         if torch.any(torch.isnan(self.layer.weight.data)):
             logging.warning('NaN in weights')
-            import pprint
-            pprint.pprint(self.quantizer.bits,
-                          self.quantizer.scale, self.quantizer.zero_point)
             raise ValueError('NaN in weights')
 
     def free(self):
@@ -284,7 +280,7 @@ def gptq_fwrd(model, dataloader, dev, args):
 
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros(
-        (args.gptq_cal_nsamples, 2048, model.config.hidden_size), dtype=dtype, device=dev
+        (args.gptq_cal_nsamples, args.gptq_cal_seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
     cache = {'i': 0, 'attention_mask': None}
 
@@ -339,7 +335,6 @@ def gptq_fwrd(model, dataloader, dev, args):
         [f'block_sparse_moe.experts.{i}.w2' for i in range(8)]
     ]
     for i in tqdm.tqdm(range(len(layers)), desc="(GPTQ Quant.) Layers"):
-        # logging.info(f'Layer {i}: ')
         layer = layers[i].to(dev)
         full = find_qlayers(layer, layers=[torch.nn.Linear])
         if 'deepseek' in args.model.lower() and i >= 1:
@@ -352,7 +347,6 @@ def gptq_fwrd(model, dataloader, dev, args):
             subset = {n: full[n] for n in names}
             gptq = {}
             for name in subset:
-                # logging.info(f'{name}  ')
                 if 'lm_head' in name:
                     continue
                 gptq[name] = GPTQ(subset[name])

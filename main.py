@@ -29,6 +29,8 @@ warnings.filterwarnings('ignore')
 
 
 def main(args):
+    setattr(args, 'had_dim', args.block_size_linear)
+    logging.info(f"had_dim: {args.had_dim}")
     # ============================ Load model
     # QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs (arXiv:2404.00456)
     if args.rotate:
@@ -37,20 +39,29 @@ def main(args):
                   'attn_implementation': "eager"}
         model = AutoModelForCausalLM.from_pretrained(
             args.model, torch_dtype='auto' if args.auto_dtype else torch.bfloat16, **kwargs)
-        from scale_utils import rotation_utils, gptq_utils, data_utils
+        from scale_utils import rotation_utils
         rotation_utils.fuse_layer_norms(model)
         rotation_utils.rotate_model(model, args)
         rotation_utils.cleanup_memory(verbos=True)
-        if args.gptq:
-            trainloader = data_utils.get_loaders(args.gptq_cal_dataset, nsamples=args.gptq_cal_nsamples,
-                                                 model=args.model, eval_mode=False)
-            gptq_utils.gptq_fwrd(model, trainloader, 'cuda:0', args)
     else:
         dev = 'balanced'
         kwargs = {'device_map': dev, 'trust_remote_code': True,
                   'attn_implementation': "eager"}
         model = AutoModelForCausalLM.from_pretrained(
-            args.model, torch_dtype='auto' if args.auto_dtype else torch.float32, **kwargs)
+            args.model, torch_dtype='auto' if args.auto_dtype else torch.bfloat16, **kwargs)
+
+    if args.post_smooth:
+        from scale_utils import smooth
+        smooth_scales = torch.load(args.post_smooth, weights_only=False)
+        logging.info(f"Load smooth scales from {args.post_smooth}")
+        smooth.smooth_lm(model, smooth_scales, 1.0)
+
+    if args.gptq:
+        from scale_utils import gptq_utils
+        from utils import calib
+        trainloader = calib.get_loaders(args.gptq_cal_dataset, nsamples=args.gptq_cal_nsamples,
+                                        seqlen=args.gptq_cal_seqlen, model=args.model, eval_mode=False)
+        gptq_utils.gptq_fwrd(model, trainloader, 'cuda:0', args)
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         args.model, trust_remote_code=True, use_fast=False)
@@ -74,9 +85,9 @@ def main(args):
     # ============================ Runtime Hadamard Transform for QuaRot
     if args.rotate:
         from scale_utils import hadamard_utils
-        if 'llama' in args.model or 'mistral' in args.model:
+        if 'llama' in args.model or 'mistral' in args.model or 'Qwen' in args.model:
             for name, module in model.named_modules():
-                if 'down_proj' in name:
+                if 'down_proj' in name and args.rotate_mode != 'identity':
                     if args.rotate_mode == 'hadamard':
                         had_K, K = hadamard_utils.get_hadK(
                             model.config.intermediate_size)
@@ -115,19 +126,18 @@ def main(args):
 
     # Load into GPU
     if model.device.type == 'cpu':
-        accelerator = Accelerator()
-        model = accelerator.prepare(model)
+        # accelerator = Accelerator()
+        # model = accelerator.prepare(model)
+        distribute_model(model)
 
     # ============================ Evaluation
     if args.eval_ppl:
         seqlen = 2048  # hard-coding
         args.limit = -1  # whole samples
-        if 'llama3' in args.model:
+        if 'Llama-3' in args.model:
             cache_testloader = f'calibset/wikitext_test_{seqlen}_{args.seed}_llama3.cache'
-        elif 'llama2' in args.model:
+        elif 'Llama-2' in args.model:
             cache_testloader = f'calibset/wikitext_test_{seqlen}_{args.seed}_llama2.cache'
-        elif 'llama' in args.model:
-            cache_testloader = f'calibset/wikitext_test_{seqlen}_{args.seed}_llama.cache'
         elif 'mistral' in args.model:
             cache_testloader = f'calibset/wikitext_test_{seqlen}_{args.seed}_mistral.cache'
         elif 'qwen2' in args.model:
@@ -194,7 +204,7 @@ def main(args):
                     break
 
             ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * seqlen))
-        logging.info(f'wikitext ppl : {ppl.item()}')
+        logging.info(f'wikitext ppl : {ppl.item():.2f}')
         model.config.use_cache = use_cache
         results = {'wiki_ppl': ppl.item()}
 
@@ -204,7 +214,7 @@ def main(args):
             tokenizer=tokenizer,
             backend='causal',
             trust_remote_code=True,
-            batch_size="auto",
+            batch_size=8,
         )
 
         with torch.no_grad():
@@ -212,7 +222,7 @@ def main(args):
                 model=lm,
                 tasks=args.tasks,
                 num_fewshot=args.num_fewshot,
-                batch_size="auto"
+                batch_size=8
             )
         results = results['results']
         logging.info(pprint.pformat(results))
@@ -231,11 +241,15 @@ if __name__ == '__main__':
     parser.add_argument('--a_elem_format_linear', type=str, default='fp4_e2m1')
     parser.add_argument('--scale_bits_linear', type=int, default=8)
     parser.add_argument('--block_size_linear', type=int, default=32)
+    parser.add_argument('--double_quant_linear', type=str2bool, default=False)
+    parser.add_argument('--w_dq_only', type=str2bool, default=False,
+                        help='Only double quantize weights, not activations')
     # Bit-configuration (MatMul)
     parser.add_argument('--A_elem_format_matmul', type=str, default='fp6_e3m2')
     parser.add_argument('--B_elem_format_matmul', type=str, default='fp4_e2m1')
     parser.add_argument('--scale_bits_matmul', type=int, default=8)
     parser.add_argument('--block_size_matmul', type=int, default=32)
+    parser.add_argument('--double_quant_matmul', type=str2bool, default=False)
     # Bit-configuration (LayerNorm)
     parser.add_argument('--w_elem_format_ln', type=str, default='fp6_e3m2')
     parser.add_argument('--a_elem_format_ln', type=str, default='fp6_e3m2')
@@ -260,6 +274,8 @@ if __name__ == '__main__':
                         choices=['hadamard', 'group_hadamard', 'identity'])
     parser.add_argument('--online_partial_had', type=str2bool, default=False)
     parser.add_argument('--sorting_transform', type=str2path, default=None)
+    parser.add_argument('--post_smooth', type=str2path, default=None,
+                        help='Path to the smooth scales file')
     parser.add_argument('--rotate_kv', type=str2bool, default=True)
     parser.add_argument('--group_rotate_kv', type=str2bool, default=False)
     parser.add_argument('--kv_quant_only', type=str2bool, default=False)
@@ -268,7 +284,8 @@ if __name__ == '__main__':
     parser.add_argument('--gptq_percdamp', type=float, default=0.01)
     parser.add_argument('--gptq_cal_dataset', type=str, default='wikitext2',
                         choices=['wikitext2', 'ptb', 'c4'])
-    parser.add_argument('--gptq_cal_nsamples', type=int, default=128)
+    parser.add_argument('--gptq_cal_nsamples', type=int, default=2048)
+    parser.add_argument('--gptq_cal_seqlen', type=int, default=128)
 
     args = parser.parse_args()
     set_seed(args.seed)
@@ -276,6 +293,7 @@ if __name__ == '__main__':
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     log_dir = f'./log'
+    log_dir = os.path.join(log_dir, f'{datetime.now().strftime("%Y-%m-%d")}-{args.model.split("/")[-1]}')
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(
         log_dir, f'{datetime.now().strftime("%Y-%m-%d_%H:%M:%S")}.txt')
@@ -288,4 +306,8 @@ if __name__ == '__main__':
         ]
     )
     logging.info(pprint.pformat(vars(args)))
+    if args.w_dq_only:
+        args.double_quant_linear = True
+        args.double_quant_matmul = False
+        logging.info("Only double quantize weights per-channel, not activations")
     main(args)

@@ -433,7 +433,7 @@ def _get_mx_quantize_params(
             A = A.contiguous()
 
             from . import custom_extensions as ce
-            scale1, scale2, shift = ce.funcs.get_mx_quantize_param_by_tile_func_cuda(
+            scale1, scale2, shift, q_A = ce.funcs.get_mx_quantize_param_by_tile_func_cuda(
                 A,
                 scale_bits,
                 ebits,
@@ -446,7 +446,7 @@ def _get_mx_quantize_params(
                 scale_mode,
                 asym,
             )
-            return scale1, scale2, shift
+            return scale1, scale2, shift, q_A
     else:
         raise NotImplementedError("PyTorch version of _get_mx_quantize_params is not implemented yet")
 

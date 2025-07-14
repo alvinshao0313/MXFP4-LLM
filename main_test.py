@@ -78,13 +78,14 @@ def main(args):
                   'attn_implementation': "eager"}
         model = AutoModelForCausalLM.from_pretrained(
             args.model, torch_dtype='auto' if args.auto_dtype else torch.bfloat16, **kwargs)
-        from scale_utils import rotation_utils, gptq_utils, data_utils
+        from scale_utils import rotation_utils, gptq_utils
         rotation_utils.fuse_layer_norms(model)
         rotation_utils.rotate_model(model, args)
         rotation_utils.cleanup_memory(verbos=True)
         if args.gptq:
-            trainloader = data_utils.get_loaders(args.gptq_cal_dataset, nsamples=args.gptq_cal_nsamples,
-                                                 model=args.model, eval_mode=False)
+            from utils import calib
+            trainloader = calib.get_loaders(args.gptq_cal_dataset, nsamples=args.gptq_cal_nsamples,
+                                            model=args.model, eval_mode=False)
             gptq_utils.gptq_fwrd(model, trainloader, 'cuda:0', args)
     else:
         dev = 'balanced'

@@ -12,6 +12,8 @@ MISTRAL_MODEL = transformers.models.mistral.modeling_mistral.MistralForCausalLM
 MISTRAL_LAYER = transformers.models.mistral.modeling_mistral.MistralDecoderLayer
 QWEN2_MODEL = transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM
 QWEN2_LAYER = transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer
+# QWEN3_MODEL = transformers.models.qwen3.modeling_qwen3.Qwen3ForCausalLM
+# QWEN3_LAYER = transformers.models.qwen3.modeling_qwen3.Qwen3DecoderLayer
 
 
 def model_type_extractor(model):
@@ -21,6 +23,8 @@ def model_type_extractor(model):
         return MISTRAL_MODEL
     elif isinstance(model, QWEN2_MODEL):
         return QWEN2_MODEL
+    # elif isinstance(model, QWEN3_MODEL):
+    #     return QWEN3_MODEL
     elif isinstance(model, OPT_MODEL):
         return OPT_MODEL
     else:
@@ -39,6 +43,8 @@ def get_rope_function_name(model):
         return "apply_rotary_pos_emb"
     if isinstance(model, QWEN2_MODEL):
         return "apply_rotary_pos_emb"
+    # if isinstance(model, QWEN3_MODEL):
+    #     return "apply_rotary_pos_emb"
     raise NotImplementedError
 
 
@@ -51,6 +57,8 @@ def get_layers(model):
         return model.model.layers
     if isinstance(model, QWEN2_MODEL):
         return model.model.layers
+    # if isinstance(model, QWEN3_MODEL):
+    #     return model.model.layers
     raise NotImplementedError
 
 
@@ -78,6 +86,18 @@ def get_qwen2(model_name, hf_token):
     return model
 
 
+# def get_qwen3(model_name, hf_token):
+#     torch.nn.init.kaiming_uniform_ = skip
+#     torch.nn.init.uniform_ = skip
+#     torch.nn.init.normal_ = skip
+#     model = transformers.Qwen3ForCausalLM.from_pretrained(model_name, torch_dtype='auto',
+#                                                           use_auth_token=hf_token,
+#                                                           low_cpu_mem_usage=True)
+#     model.seqlen = 2048
+#     logging.info('---> Loading {} Model with seq_len: {}'.format(model_name, model.seqlen))
+#     return model
+
+
 def get_opt(model_name):
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
@@ -96,8 +116,10 @@ def get_model(
         return get_llama(model_name, hf_token)
     elif 'mistral' in model_name:
         return get_llama(model_name, hf_token)
-    elif 'qwen2' in model_name:
+    elif 'Qwen2' in model_name:
         return get_qwen2(model_name, hf_token)
+    # elif 'Qwen3' in model_name:
+    #     return get_qwen3(model_name, hf_token)
     elif 'opt' in model_name:
         return get_opt(model_name)
     else:
@@ -113,6 +135,8 @@ def get_model_type(model):
         model_type = MISTRAL_MODEL
     elif isinstance(model, QWEN2_MODEL):
         model_type = QWEN2_MODEL
+    # elif isinstance(model, QWEN3_MODEL):
+    #     model_type = QWEN3_MODEL
     else:
         raise ValueError(f'Unknown model type {model}')
     return model_type
@@ -125,6 +149,8 @@ def get_embeddings(model, model_type) -> list[torch.nn.Module]:
         return [model.model.embed_tokens]
     elif model_type == QWEN2_MODEL:
         return [model.model.embed_tokens]
+    # elif model_type == QWEN3_MODEL:
+    #     return [model.model.embed_tokens]
     elif model_type == OPT_MODEL:
         return [model.model.decoder.embed_tokens, model.model.decoder.embed_positions]
     else:
@@ -138,6 +164,8 @@ def get_transformer_layers(model, model_type):
         return [layer for layer in model.model.layers]
     elif model_type == QWEN2_MODEL:
         return [layer for layer in model.model.layers]
+    # elif model_type == QWEN3_MODEL:
+    #     return [layer for layer in model.model.layers]
     elif model_type == OPT_MODEL:
         return [layer for layer in model.model.decoder.layers]
     else:
@@ -151,6 +179,8 @@ def get_lm_head(model, model_type):
         return model.lm_head
     elif model_type == QWEN2_MODEL:
         return model.lm_head
+    # elif model_type == QWEN3_MODEL:
+    #     return model.lm_head
     elif model_type == OPT_MODEL:
         return model.lm_head
     else:
@@ -170,6 +200,10 @@ def get_pre_head_layernorm(model, model_type):
         pre_head_layernorm = model.model.norm
         assert isinstance(pre_head_layernorm,
                           transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm)
+    # elif model_type == QWEN3_MODEL:
+    #     pre_head_layernorm = model.model.norm
+    #     assert isinstance(pre_head_layernorm,
+    #                       transformers.models.qwen3.modeling_qwen3.Qwen3RMSNorm)
     elif model_type == OPT_MODEL:
         pre_head_layernorm = model.model.decoder.final_layer_norm
         assert pre_head_layernorm is not None
@@ -186,6 +220,8 @@ def get_mlp_bottleneck_size(model):
         return model.config.intermediate_size
     elif model_type == QWEN2_MODEL:
         return model.config.intermediate_size
+    # elif model_type == QWEN3_MODEL:
+    #     return model.config.intermediate_size
     elif model_type == OPT_MODEL:
         return model.config.ffn_dim
     else:
@@ -235,7 +271,7 @@ class RMSN(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.mean_dim = mean_dim
-        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.weight = torch.nn.Parameter(torch.ones(mean_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
@@ -243,10 +279,10 @@ class RMSN(torch.nn.Module):
             x = x.to(torch.float32)
         variance = x.pow(2).sum(-1, keepdim=True) / self.mean_dim
         x = x * torch.rsqrt(variance + self.eps)
-        return x.to(input_dtype)
+        return (self.weight * x).to(input_dtype)
 
 
-class Qwen2RMSN(torch.nn.Module):
+class Qwen23RMSN(torch.nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(hidden_size))
@@ -257,7 +293,7 @@ class Qwen2RMSN(torch.nn.Module):
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return hidden_states.to(input_dtype)
+        return (self.weight * hidden_states).to(input_dtype)
 
 
 def get_layer_io_save_path(args):

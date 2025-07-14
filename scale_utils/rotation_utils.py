@@ -72,6 +72,10 @@ def fuse_layer_norms(model):
             fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])
             fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj,
                            layer.self_attn.k_proj, layer.self_attn.v_proj])
+        # elif model_type == model_utils.QWEN3_MODEL:
+        #     fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])
+        #     fuse_ln_linear(layer.input_layernorm, [layer.self_attn.q_proj,
+        #                    layer.self_attn.k_proj, layer.self_attn.v_proj])
         elif model_type == model_utils.OPT_MODEL:
             fuse_ln_linear(layer.self_attn_layer_norm, [layer.self_attn.q_proj,
                            layer.self_attn.k_proj, layer.self_attn.v_proj])
@@ -103,7 +107,14 @@ def fuse_layer_norms(model):
         model_utils.replace_modules(
             model,
             transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm,
-            lambda _: model_utils.Qwen2RMSN(model.config.hidden_size),
+            lambda _: model_utils.Qwen23RMSN(model.config.hidden_size),
+            replace_layers=False,
+        )
+    elif model_type == model_utils.QWEN3_MODEL:
+        model_utils.replace_modules(
+            model,
+            transformers.models.qwen3.modeling_qwen3.Qwen3RMSNorm,
+            lambda _: model_utils.Qwen23RMSN(model.config.hidden_size),
             replace_layers=False,
         )
     else:
@@ -331,6 +342,13 @@ def apply_multi_head_rotate(module, Q, head_dim, head_num, output=False, **kwarg
         W_ = W_.reshape(-1, head_num, head_dim).transpose(0, 1)
         W_ = torch.matmul(W_, Q)
         W_ = W_.transpose(0, 1).reshape(transposed_shape).t()
+        if module.bias is not None:
+            b = module.bias.data.to(device="cuda:0", dtype=torch.float64)
+            b = b[kwargs['sorting_idx']] if kwargs.get('reflow', False) else b
+            b_ = b.reshape(head_num, head_dim)
+            b_ = torch.matmul(b_, Q)
+            b_ = b_.reshape(-1)
+            module.bias.data = b_.to(device=dev, dtype=dtype)
     else:
         if kwargs.get('reflow', False):
             n_rep = init_shape[1] // (head_dim * head_num)
@@ -359,7 +377,7 @@ def rotate_model(model, args):
         sorting_transforms = torch.load(args.sorting_transform, map_location='cpu', weights_only=False)
         sorted_idx = sorting_transforms["R1"]
         s_Q1 = torch.eye(model.config.hidden_size, device="cuda:0", dtype=torch.float64)[:, sorted_idx]
-        Q1 = s_Q1 @ Q1
+        # Q1 = s_Q1 @ Q1
         del s_Q1
     Q2 = get_orthogonal_matrix(head_dim, args.rotate_mode, device="cuda:0", **
                                kwargs) if not args.online_partial_had else None
@@ -388,8 +406,8 @@ def rotate_model(model, args):
         rotate_ov_proj(layers[idx], model_type, kv_head, head_dim, args,
                        **{
             'Q2': Q2,
-            'sorting_idx': sorting_transforms[f"model.layers.{idx}.self_attn.R2"] if args.sorting_transform else None,
-            'reflow': True if args.sorting_transform else False
+            # 'sorting_idx': sorting_transforms[f"model.layers.{idx}.self_attn.R2"] if args.sorting_transform else None,
+            # 'reflow': True if args.sorting_transform else False
         })
 
 

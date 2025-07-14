@@ -123,6 +123,7 @@ class MxSpecs(collections.UserDict):
             "A_scale_mode": 0,
             "B_scale_mode": 0,
             "per_tensor": False,
+            "double_quant": False,
         }
 
         self.help_strings = {
@@ -141,7 +142,7 @@ class MxSpecs(collections.UserDict):
             "shared_exp_method": "Shared exponent calculation method. " "Options: max, none",
             "block_size": "mx shared exponent block size",
 
-            "bfloat": 
+            "bfloat":
                 "BfloatX format (8exp + sign + mantissa). Only one of bfloat or fp can be used",
             "fp":
                 "fpX format (5exp + sign + mantissa). Only one of bfloat or fp can be used",
@@ -174,6 +175,7 @@ class MxSpecs(collections.UserDict):
             "A_scale_mode": "Full-precision shared scale instead of PoT",
             "B_scale_mode": "Full-precision shared scale instead of PoT",
             "per_tensor": "Per-tensor quantization",
+            "double_quant": "Use double quantization for weights and activations",
         }
 
         for k in defaults:
@@ -181,13 +183,13 @@ class MxSpecs(collections.UserDict):
                 self.data[k] = defaults[k]
 
         for k in self.data.keys():
-            assert(k in self.help_strings.keys())
+            assert (k in self.help_strings.keys())
 
     def safe_json(self, indent=None):
         """
         Return json of parameters.
         """
-        default = lambda o: f"<<non-serializable: {type(o).__qualname__}>>"
+        def default(o): return f"<<non-serializable: {type(o).__qualname__}>>"
         return json.dumps(self.data, indent=indent, default=default)
 
     def __str__(self):
@@ -295,7 +297,7 @@ def finalize_mx_specs(specs, early_exit=True):
     """
     # Early exit, works for 0 and None
     if (
-        not specs.get("w_elem_format", 0) 
+        not specs.get("w_elem_format", 0)
         and not specs.get("a_elem_format", 0)
         and not specs.get("w_elem_format_bp", 0)
         and not specs.get("a_elem_format_bp_os", 0)

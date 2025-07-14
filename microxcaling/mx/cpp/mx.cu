@@ -230,19 +230,27 @@ std::vector<torch::Tensor> get_mx_quantize_param_by_tile_cuda(
     }
 
     const long total_tiles = pre_axis_size * num_tiles * post_axis_size;
+    const long total_elems = input.numel();
 
-    // 创建输出张量
-    auto scales_shape = std::vector<long>{total_tiles};
-    auto shifts_shape = std::vector<long>{total_tiles};
+    // 四个输出张量，shape都与input一致
+    auto param_shape = input.sizes();
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+    auto scales1 = torch::zeros(param_shape, options);
+    auto scales2 = torch::zeros(param_shape, options);
+    auto shifts  = torch::zeros(param_shape, options);
+    auto quantized_out = torch::zeros(param_shape, options);
+    // // 创建输出张量
+    // auto scales_shape = std::vector<long>{total_tiles};
+    // auto shifts_shape = std::vector<long>{total_tiles};
     
-    // 对于某些非对称量化模式，可能需要更大的输出张量
-    if (asym == 1) {
-        scales_shape[0] = total_tiles * 2; // 存储正负缩放因子
-    }
+    // // 对于某些非对称量化模式，可能需要更大的输出张量
+    // if (asym == 1) {
+    //     scales_shape[0] = total_tiles * 2; // 存储正负缩放因子
+    // }
     
-    auto scales1 = torch::zeros(scales_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-    auto scales2 = torch::zeros(scales_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-    auto shifts = torch::zeros(shifts_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    // auto scales1 = torch::zeros(scales_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    // auto scales2 = torch::zeros(scales_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    // auto shifts = torch::zeros(shifts_shape, torch::TensorOptions().dtype(torch::kFloat32).device(device));
 
     // 计算 CUDA 网格和块配置
     const long blocks = get_blocks(total_tiles);
@@ -269,13 +277,14 @@ std::vector<torch::Tensor> get_mx_quantize_param_by_tile_cuda(
             asym,
             scales1.data_ptr<float>(),
             scales2.data_ptr<float>(),
-            shifts.data_ptr<float>()
+            shifts.data_ptr<float>(),
+            quantized_out.data_ptr<float>()   // 新增
         );
     }
 
     gpuErrchk(cudaPeekAtLastError());
     
-    return {scales1, scales2, shifts};
+    return {scales1, scales2, shifts, quantized_out};
 }
 
 

@@ -5,8 +5,9 @@ Licensed under the MIT License.
 
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 
-from .mx_ops import quantize_mx_op
+from .mx_ops import quantize_mx_op, get_mx_quantize_params
 from .elemwise_ops import quantize_elemwise_op
 from .specs import apply_mx_specs, get_backwards_mx_specs
 from .specs import mx_assert_test
@@ -59,22 +60,90 @@ class LinearFunction(torch.autograd.Function):
             ctx.save_for_backward(input, weight)
 
         # MX quantize everything along input size
-        qis_input = quantize_mx_op(
-            bf_in,
-            mx_specs,
-            elem_format=mx_specs['a_elem_format'],
-            scale_mode=mx_specs['a_scale_mode'],
-            axes=[-1],
-            round=mx_specs["round_mx_output"],
-        )
-        qis_weight = quantize_mx_op(
-            bf_weight,
-            mx_specs,
-            elem_format=mx_specs['w_elem_format'],
-            scale_mode=mx_specs['w_scale_mode'],
-            axes=[-1],
-            round=mx_specs["round_mx_output"],
-        )
+        if not mx_specs['double_quant']:
+            qis_input = quantize_mx_op(
+                bf_in,
+                mx_specs,
+                elem_format=mx_specs['a_elem_format'],
+                scale_mode=mx_specs['a_scale_mode'],
+                axes=[-1],
+                round=mx_specs["round_mx_output"],
+            )
+            qis_weight = quantize_mx_op(
+                bf_weight,
+                mx_specs,
+                elem_format=mx_specs['w_elem_format'],
+                scale_mode=mx_specs['w_scale_mode'],
+                axes=[-1],
+                round=mx_specs["round_mx_output"],
+            )
+        elif mx_specs['double_quant']:  # double quantization
+            if mx_specs['a_elem_format']:
+                assert 'asym' not in mx_specs['a_elem_format'], "Asymmetric quantization is not supported for double quantization"
+            assert 'asym' not in mx_specs['w_elem_format'], "Asymmetric quantization is not supported for double quantization"
+            assert mx_specs['a_scale_mode'] in [
+                143, 152, 0], "Only scale_mode 143, 152, or 0 is supported for double quantization"
+            assert mx_specs['w_scale_mode'] in [
+                143, 152, 0], "Only scale_mode 143, 152, or 0 is supported for double quantization"
+
+            def scale_mode_to_elem_format(scale_mode):
+                if scale_mode == 143:
+                    return 'fp8_e4m3'
+                elif scale_mode == 152:
+                    return 'fp8_e5m2'
+                elif scale_mode == 0:
+                    return 'e8m0'
+                else:
+                    raise ValueError(f"Unsupported scale mode: {scale_mode}")
+            w_scale, _, _, q_w = get_mx_quantize_params(
+                bf_weight,
+                mx_specs,
+                elem_format=mx_specs['w_elem_format'],
+                scale_mode=2,
+                axes=[-1],
+                round=mx_specs["round_mx_output"],
+            )
+            scale_mx_specs = mx_specs.copy()
+            if args.w_dq_only:
+                qis_input = quantize_mx_op(
+                    bf_in,
+                    mx_specs,
+                    elem_format=mx_specs['a_elem_format'],
+                    scale_mode=mx_specs['a_scale_mode'],
+                    axes=[-1],
+                    round=mx_specs["round_mx_output"],
+                )
+                scale_mx_specs['block_size'] = -1
+            else:
+                in_scale, _, _, q_in = get_mx_quantize_params(
+                    bf_in,
+                    mx_specs,
+                    elem_format=mx_specs['a_elem_format'],
+                    scale_mode=2,
+                    axes=[-1],
+                    round=mx_specs["round_mx_output"],
+                )
+                scale_mx_specs['per_tensor'] = True
+                q_in_scale = quantize_mx_op(
+                    in_scale,
+                    scale_mx_specs,
+                    elem_format=scale_mode_to_elem_format(mx_specs['a_scale_mode']),
+                    scale_mode=2,
+                    axes=[-1],
+                    round=scale_mx_specs["round_mx_output"],
+                )
+                qis_input = q_in_scale * q_in
+
+            q_w_scale = quantize_mx_op(
+                w_scale,
+                scale_mx_specs,
+                elem_format=scale_mode_to_elem_format(mx_specs['w_scale_mode']),
+                scale_mode=2,
+                axes=[-1],
+                round=scale_mx_specs["round_mx_output"],
+            )
+            qis_weight = q_w_scale * q_w
+
         qis_input = qis_input.to(dtype)
         qis_weight = qis_weight.to(dtype)
 
@@ -254,6 +323,7 @@ class Linear(torch.nn.Linear):
                 inputs.reshape(-1, init_shape[-1] // self.had_dim, self.had_dim),
                 scale=1 / math.sqrt(self.had_dim))
             inputs = inputs.reshape(init_shape)
+
         out = linear(
             input=inputs,
             weight=self.weight,
@@ -262,5 +332,4 @@ class Linear(torch.nn.Linear):
             name=self.name,
             args=self.args,
         )
-
         return out

@@ -17,7 +17,12 @@ from transformers.modeling_attn_mask_utils import (
     _prepare_4d_causal_attention_mask,
     _prepare_4d_causal_attention_mask_for_sdpa,
 )
-from transformers.models.llama.modeling_llama import rotate_half, apply_rotary_pos_emb, repeat_kv
+from transformers.models.llama.modeling_llama import (
+    rotate_half,
+    apply_rotary_pos_emb,
+    repeat_kv
+)
+
 
 def llama_forward(
     self,
@@ -123,6 +128,7 @@ def llama_forward(
 
     return attn_output, attn_weights, past_key_value
 
+
 def opt_forward(
     self,
     hidden_states: torch.Tensor,
@@ -178,7 +184,7 @@ def opt_forward(
     value_states = value_states.view(*proj_shape)
 
     src_len = key_states.size(1)
-    #attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+    # attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
     attn_weights = self.matmul1(query_states, key_states.transpose(1, 2))
 
     if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
@@ -225,7 +231,7 @@ def opt_forward(
 
     attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-    #attn_output = torch.bmm(attn_probs, value_states)
+    # attn_output = torch.bmm(attn_probs, value_states)
     attn_output = self.matmul2(attn_probs, value_states)
 
     if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
@@ -244,6 +250,7 @@ def opt_forward(
     attn_output = self.out_proj(attn_output)
 
     return attn_output, attn_weights_reshaped, past_key_value
+
 
 def qwen_attn(self, query, key, value, causal_mask=None, attention_mask=None, head_mask=None):
     device = query.device
@@ -264,7 +271,7 @@ def qwen_attn(self, query, key, value, causal_mask=None, attention_mask=None, he
             key = dequantize_cache_torch(qk, qk_scale, qk_zero)
             attn_weights = torch.matmul(query, key.transpose(-1, -2))
     else:
-        #attn_weights = torch.matmul(query, key.transpose(-1, -2))
+        # attn_weights = torch.matmul(query, key.transpose(-1, -2))
         attn_weights = self.matmul1(query, key.transpose(-1, -2))
 
     if self.scale_attn_weights:
@@ -313,12 +320,13 @@ def qwen_attn(self, query, key, value, causal_mask=None, attention_mask=None, he
             value = dequantize_cache_torch(qv, qv_scale, qv_zero)
             attn_output = torch.matmul(attn_weights, value)
     else:
-        #attn_output = torch.matmul(attn_weights, value)
+        # attn_output = torch.matmul(attn_weights, value)
         attn_output = self.matmul2(attn_weights, value)
 
     attn_output = attn_output.transpose(1, 2)
 
     return attn_output, attn_weights
+
 
 def mistral_forward(
     self,
@@ -364,7 +372,7 @@ def mistral_forward(
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-    #attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+    # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
     attn_weights = self.matmul1(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
     if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
@@ -384,7 +392,7 @@ def mistral_forward(
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-    #attn_output = torch.matmul(attn_weights, value_states)
+    # attn_output = torch.matmul(attn_weights, value_states)
     attn_output = self.matmul2(attn_weights, value_states)
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -402,6 +410,7 @@ def mistral_forward(
         attn_weights = None
 
     return attn_output, attn_weights, past_key_value
+
 
 def qwen2_forward(
     self,
@@ -447,7 +456,7 @@ def qwen2_forward(
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-    #attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+    # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
     attn_weights = self.matmul1(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
     if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
@@ -467,7 +476,7 @@ def qwen2_forward(
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-    #attn_output = torch.matmul(attn_weights, value_states)
+    # attn_output = torch.matmul(attn_weights, value_states)
     attn_output = self.matmul2(attn_weights, value_states)
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -485,6 +494,7 @@ def qwen2_forward(
         attn_weights = None
 
     return attn_output, attn_weights, past_key_value
+
 
 def llm_pruner_llama_forward(
     self,
@@ -526,7 +536,7 @@ def llm_pruner_llama_forward(
 
     past_key_value = (key_states, value_states) if use_cache else None
 
-    #attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+    # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
     attn_weights = self.matmul1(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
     if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
@@ -541,11 +551,12 @@ def llm_pruner_llama_forward(
                 f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
             )
         attn_weights = attn_weights + attention_mask
-        attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min, device=attn_weights.device))
+        attn_weights = torch.max(attn_weights, torch.tensor(
+            torch.finfo(attn_weights.dtype).min, device=attn_weights.device))
 
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-    #attn_output = torch.matmul(attn_weights, value_states)
+    # attn_output = torch.matmul(attn_weights, value_states)
     attn_output = self.matmul2(attn_weights, value_states)
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -563,6 +574,7 @@ def llm_pruner_llama_forward(
         attn_weights = None
 
     return attn_output, attn_weights, past_key_value
+
 
 def bart_forward(
     self,
@@ -626,7 +638,7 @@ def bart_forward(
     value_states = value_states.reshape(*proj_shape)
 
     src_len = key_states.size(1)
-    #attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+    # attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
     attn_weights = self.matmul1(query_states, key_states.transpose(1, 2))
 
     if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
@@ -666,7 +678,7 @@ def bart_forward(
 
     attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-    #attn_output = torch.bmm(attn_probs, value_states)
+    # attn_output = torch.bmm(attn_probs, value_states)
     attn_output = self.matmul2(attn_probs, value_states)
 
     if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):

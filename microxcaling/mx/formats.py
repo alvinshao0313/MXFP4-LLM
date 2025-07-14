@@ -12,6 +12,8 @@ FP32_EXPONENT_BIAS = 127
 FP32_MIN_NORMAL = 2 ** (-FP32_EXPONENT_BIAS + 1)
 
 # Enum for rounding modes
+
+
 class RoundingMode(IntEnum):
     nearest = 0
     floor = 1
@@ -22,6 +24,8 @@ class RoundingMode(IntEnum):
         return [s.name for s in list(RoundingMode)]
 
 # Enum for scalar data formats
+
+
 class ElemFormat(Enum):
     int8 = 1
     int4 = 2
@@ -53,10 +57,11 @@ class ElemFormat(Enum):
     int3_asym = 24
     fp3_e2m0 = 25
     fp3_e2m0_asym = 26
+    e8m0 = 27
 
     @staticmethod
     def from_str(s):
-        assert(s != None), "String elem_format == None"
+        assert (s != None), "String elem_format == None"
         s = s.lower()
         if hasattr(ElemFormat, s):
             return getattr(ElemFormat, s)
@@ -72,12 +77,14 @@ def _get_min_norm(ebits):
 
 def _get_max_norm(ebits, mbits):
     """ Valid only for floats that define NaN """
-    assert(ebits >= 5), "invalid for floats that don't define NaN"
-    emax = 0 if ebits==0 else 2**(ebits - 1) - 1
-    return 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
+    assert (ebits >= 5), "invalid for floats that don't define NaN"
+    emax = 0 if ebits == 0 else 2**(ebits - 1) - 1
+    return 2**emax * float(2**(mbits - 1) - 1) / 2**(mbits - 2)
 
 
 _FORMAT_CACHE = {}
+
+
 def _get_format_params(fmt):
     """ Allowed formats:
         - intX:         2 <= X <= 32, assume sign-magnitude, 1.xxx representation
@@ -181,16 +188,25 @@ def _get_format_params(fmt):
     elif fmt == ElemFormat.int6_asym:
         ebits, mbits = 0, 6
         emax = 0
+    elif fmt == ElemFormat.e8m0:
+        ebits, mbits = 8, 1  # 8位指数，2位包括符号位和隐含位（无显式尾数位，纯PoT格式）
+        emax = 2**(ebits - 1) - 1  # 标准指数范围
     else:
         raise Exception("Unknown element format %s" % fmt)
-    
-    if fmt != ElemFormat.fp8_e4m3:
-        max_norm = 2**emax * float(2**(mbits-1) - 1) / 2**(mbits-2)
-    else:
+
+    # if fmt != ElemFormat.fp8_e4m3:
+    #     max_norm = 2**emax * float(2**(mbits - 1) - 1) / 2**(mbits - 2)
+    # else:
+    #     max_norm = 2**emax * 1.75  # FP8 has custom max_norm
+    if fmt == ElemFormat.fp8_e4m3:
         max_norm = 2**emax * 1.75  # FP8 has custom max_norm
+    elif fmt == ElemFormat.e8m0:
+        max_norm = 2**emax  # PoT format: max value is 2^emax
+    else:
+        max_norm = 2**emax * float(2**(mbits - 1) - 1) / 2**(mbits - 2)
 
     min_norm = _get_min_norm(ebits)
-    
+
     _FORMAT_CACHE[fmt] = (ebits, mbits, emax, max_norm, min_norm)
 
     return ebits, mbits, emax, max_norm, min_norm

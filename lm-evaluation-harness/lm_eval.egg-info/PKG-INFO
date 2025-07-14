@@ -19,7 +19,7 @@ Requires-Dist: datasets>=2.16.0
 Requires-Dist: evaluate>=0.4.0
 Requires-Dist: jsonlines
 Requires-Dist: numexpr
-Requires-Dist: peft>=0.2.0
+Requires-Dist: peft<=0.10.0,>=0.2.0
 Requires-Dist: pybind11>=2.6.2
 Requires-Dist: pytablewriter
 Requires-Dist: rouge-score>=0.0.4

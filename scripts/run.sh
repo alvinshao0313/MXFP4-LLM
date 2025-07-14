@@ -12,6 +12,11 @@
     # AsymFP4 (E2M1): fp4_e2m1_asym
     # INT4: int4
     # AsymINT4: int4_asym
+if [ $# -lt 3 ]; then
+    echo "Usage: $0 <gpu_id> <model> <post_smooth>"
+    echo "Example: $0 0 llama2-7b none"
+    exit 1
+fi
 
 model=none
 seed=0
@@ -39,7 +44,7 @@ a_elem_format_head=none
 scale_bits_head=8
 block_size_head=16
 
-auto_dtype=true
+auto_dtype=false
 custom_cuda=true
 a_scale_mode=0
 w_scale_mode=0 
@@ -48,16 +53,22 @@ B_scale_mode=0
 per_tensor=false
 
 rotate=true
-rotate_mode=group_hadamard
+rotate_mode=group_hadamard  # 'hadamard', 'group_hadamard', 'identity'
 rotate_kv=true
-sorting_transform=/home/shaoyuantian/program/MXFP4-LLM/sorting_index/Meta-Llama-3-8B-sorted_idx.pt
+sorting_transform=none
+post_smooth=$3
 group_rotate_kv=false
 kv_quant_only=true
 kv_tokenwise=true
-gptq=false
+double_quant_linear=false
+w_dq_only=false
+double_quant_matmul=false
+gptq=true
 gptq_percdamp=0.01
 gptq_cal_dataset=wikitext2
-gptq_cal_nsamples=128
+gptq_cal_nsamples=2048
+gptq_cal_seqlen=128
+
 
 for model in $2
 do
@@ -67,17 +78,17 @@ scale_bits_linear=$scale_bits
 scale_bits_matmul=$scale_bits
 for per_tensor in false
 do
-for block_size in 16
+for block_size in 32
 do
 block_size_linear=$block_size
 block_size_matmul=$block_size
-for format in none #int4
+for format in fp4_e2m1
 do
 w_elem_format_linear=$format
 A_elem_format_matmul=$format
-a_elem_format_linear=fp4_e2m1 # $format
+a_elem_format_linear=$format
 B_elem_format_matmul=$format
-for scale_mode in 152
+for scale_mode in 0
 do
 w_scale_mode=$scale_mode
 A_scale_mode=$scale_mode
@@ -94,10 +105,13 @@ CUDA_VISIBLE_DEVICES=$1 python main.py \
     --a_elem_format_linear=$a_elem_format_linear \
     --scale_bits_linear=$scale_bits_linear \
     --block_size_linear=$block_size_linear \
+    --double_quant_linear=$double_quant_linear \
+    --w_dq_only=$w_dq_only \
     --A_elem_format_matmul=$A_elem_format_matmul \
     --B_elem_format_matmul=$B_elem_format_matmul \
     --scale_bits_matmul=$scale_bits_matmul \
     --block_size_matmul=$block_size_matmul \
+    --double_quant_matmul=$double_quant_matmul \
     --w_elem_format_ln=$w_elem_format_ln \
     --a_elem_format_ln=$a_elem_format_ln \
     --scale_bits_ln=$scale_bits_ln \
@@ -117,13 +131,15 @@ CUDA_VISIBLE_DEVICES=$1 python main.py \
     --rotate_mode=$rotate_mode \
     --rotate_kv=$rotate_kv \
     --sorting_transform=$sorting_transform \
+    --post_smooth=$post_smooth \
     --group_rotate_kv=$group_rotate_kv \
     --kv_quant_only=$kv_quant_only \
     --kv_tokenwise=$kv_tokenwise \
     --gptq=$gptq \
     --gptq_percdamp=$gptq_percdamp \
     --gptq_cal_dataset=$gptq_cal_dataset \
-    --gptq_cal_nsamples=$gptq_cal_nsamples
+    --gptq_cal_nsamples=$gptq_cal_nsamples \
+    --gptq_cal_seqlen=$gptq_cal_seqlen
 done
 done
 done

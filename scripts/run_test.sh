@@ -47,9 +47,9 @@ A_scale_mode=0
 B_scale_mode=0 
 per_tensor=false
 
-rotate=true
+rotate=false
 rotate_mode=hadamard
-gptq=true
+gptq=false
 rotate_kv=true
 sorting_transform=none #/home/shaoyuantian/program/MXFP4-LLM/sorting_index/Meta-Llama-3-8B-sorted_idx.pt
 group_rotate_kv=false

@@ -5,26 +5,36 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python 调试程序: 包含参数的当前文件",
+            "name": "手动输入",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        },
+        {
+            "name": "预置超参",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
+                "--double_quant",
+                "false",
                 "--model",
                 "meta-llama/Meta-Llama-3-8B",
                 "--seed",
                 "0",
                 "--tasks",
-                "piqa,arc_easy,arc_challenge,winogrande,social_iqa,openbookqa",
+                "none",
                 "--num_fewshot",
                 "none",
                 "--eval_ppl",
                 "true",
                 "--w_elem_format_linear",
-                "none",
+                "fp4_e2m1",
                 "--a_elem_format_linear",
-                "none",
+                "fp4_e2m1",
                 "--scale_bits_linear",
                 "16",
                 "--block_size_linear",
@@ -70,7 +80,7 @@
                 "--rotate",
                 "true",
                 "--rotate_mode",
-                "hadamard",
+                "group_hadamard",
                 "--rotate_kv",
                 "true",
                 "--sorting_transform",
@@ -83,6 +93,10 @@
                 "true",
                 "--gptq",
                 "true",
+                "--sorting_transform",
+                "none",
+                "--smooth",
+                "/home/shaoyuantian/program/MXFP4-LLM/smooth_scales/Meta-Llama-3-8B_per_smooth_scales.pt"
             ]
         }
     ]

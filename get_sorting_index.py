@@ -8,11 +8,24 @@ from tqdm import tqdm
 import gc
 import sys
 from scale_utils import model_utils
-from scale_utils import data_utils
 from scale_utils import rotation_utils
+from utils import calib
+from utils.common import *
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+from transformers.cache_utils import DynamicCache
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 default_path = '/home/shaoyuantian/program/MXFP4-LLM/sorting_index/'
+
+
+def scatter_largest_to_groups(sorted_idx, block_size):
+    N = sorted_idx.shape[-1]
+    num_groups = N // block_size
+    grouped_idx = torch.empty_like(sorted_idx)
+    for i in range(N):
+        group = i % num_groups
+        pos_in_group = i // num_groups
+        grouped_idx[group * block_size + pos_in_group] = sorted_idx[i]
+    return grouped_idx
 
 
 def get_sorting_index(model, dataloader, save_path, args):
@@ -21,6 +34,7 @@ def get_sorting_index(model, dataloader, save_path, args):
     model.config.use_cache = False
     config = model.config
     dtype = config.torch_dtype
+    head_dim = config.hidden_size // config.num_attention_heads
     model_type = model_utils.model_type_extractor(model)
     dev = 'cuda'  # next(model.parameters()).device
 
@@ -98,8 +112,10 @@ def get_sorting_index(model, dataloader, save_path, args):
     r1_blocks = ["self_attn.q_proj",
                  "mlp.up_proj",]
     r2_blocks = ["self_attn.o_proj",]
-    r3_blocks = []
     r4_blocks = ["mlp.down_proj"]
+    # q_states = {}
+    # k_states = {}
+    # past_key_value = DynamicCache()
 
     for idx, decoder_layer in tqdm(enumerate(layers), total=len(layers), desc="Processing layers"):
         decoder_layer = decoder_layer.to(dev)
@@ -113,17 +129,23 @@ def get_sorting_index(model, dataloader, save_path, args):
         def stat_tensor(name, tensor):
             t_num, hidden_size = tensor.view(-1, tensor.shape[-1]).shape
             if name in r1_blocks:
-                r1_act_avg['act_avg'] = (r1_act_avg['act_avg'] * r1_act_avg['idx'] +
-                                         tensor.view(-1, hidden_size).sum(dim=0, keepdim=True)) / (r1_act_avg['idx'] + t_num)
-                r1_act_avg['idx'] += t_num
+                r1_act_avg['act_avg'] = torch.maximum(
+                    r1_act_avg['act_avg'], tensor.view(-1, hidden_size).abs().max(dim=0, keepdim=True)[0])
+                # r1_act_avg['act_avg'] = (r1_act_avg['act_avg'] * r1_act_avg['idx'] +
+                #                          tensor.view(-1, hidden_size).sum(dim=0, keepdim=True)) / (r1_act_avg['idx'] + t_num)
+                # r1_act_avg['idx'] += t_num
             elif name in r2_blocks:
-                r2_act_avg[f'layer_{idx}_act_avg'] = (r2_act_avg[f'layer_{idx}_act_avg'] * r2_act_avg[f'layer_{idx}_idx'] +
-                                                      tensor.view(-1, hidden_size).sum(dim=0, keepdim=True)) / (r2_act_avg[f'layer_{idx}_idx'] + t_num)
-                r2_act_avg[f'layer_{idx}_idx'] += t_num
+                r2_act_avg[f'layer_{idx}_act_avg'] = torch.maximum(
+                    r2_act_avg[f'layer_{idx}_act_avg'], tensor.view(-1, hidden_size).abs().max(dim=0, keepdim=True)[0])
+                # r2_act_avg[f'layer_{idx}_act_avg'] = (r2_act_avg[f'layer_{idx}_act_avg'] * r2_act_avg[f'layer_{idx}_idx'] +
+                #                                       tensor.view(-1, hidden_size).sum(dim=0, keepdim=True)) / (r2_act_avg[f'layer_{idx}_idx'] + t_num)
+                # r2_act_avg[f'layer_{idx}_idx'] += t_num
             elif name in r4_blocks:
-                r4_act_avg[f'layer_{idx}_act_avg'] = (r4_act_avg[f'layer_{idx}_act_avg'] * r4_act_avg[f'layer_{idx}_idx'] +
-                                                      tensor.view(-1, hidden_size).sum(dim=0, keepdim=True)) / (r4_act_avg[f'layer_{idx}_idx'] + t_num)
-                r4_act_avg[f'layer_{idx}_idx'] += t_num
+                r4_act_avg[f'layer_{idx}_act_avg'] = torch.maximum(
+                    r4_act_avg[f'layer_{idx}_act_avg'], tensor.view(-1, hidden_size).abs().max(dim=0, keepdim=True)[0])
+                # r4_act_avg[f'layer_{idx}_act_avg'] = (r4_act_avg[f'layer_{idx}_act_avg'] * r4_act_avg[f'layer_{idx}_idx'] +
+                #                                       tensor.view(-1, hidden_size).sum(dim=0, keepdim=True)) / (r4_act_avg[f'layer_{idx}_idx'] + t_num)
+                # r4_act_avg[f'layer_{idx}_idx'] += t_num
 
         def stat_input_hook(m, x, y, name):
             if isinstance(x, tuple):
@@ -149,8 +171,18 @@ def get_sorting_index(model, dataloader, save_path, args):
         # 记录 layer idx 输出
         with torch.no_grad():
             for j in range(args.nsamples):
-                fp_inps[j] = decoder_layer(fp_inps[j].unsqueeze(
-                    0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                layer_outputs = decoder_layer(fp_inps[j].unsqueeze(
+                    0), attention_mask=attention_mask, position_ids=position_ids,
+                    # use_cache=True,
+                    # past_key_value=past_key_value
+                )
+                fp_inps[j] = layer_outputs[0]
+
+        # k_states[f'layer_{idx}_act_avg'] = past_key_value.key_cache[idx].squeeze(
+        # ).cpu().transpose(0, 1).reshape(-1, config.num_key_value_heads * head_dim)
+        # k_states[f'layer_{idx}_act_avg'] = k_states[f'layer_{idx}_act_avg'].mean(dim=0, keepdim=True)
+        # past_key_value.key_cache[idx] = 0
+        # past_key_value.value_cache[idx] = 0
 
         for h in hooks:
             h.remove()
@@ -159,6 +191,7 @@ def get_sorting_index(model, dataloader, save_path, args):
 
     sorted_idx = {}
     _, sorted_idx['R1'] = torch.sort(r1_act_avg['act_avg'].squeeze().abs(), dim=-1, descending=True)
+    # sorted_idx['R1'] = scatter_largest_to_groups(sorted_idx['R1'], 32)
     for i in range(len(layers)):
         r2_act_avg[f'layer_{i}_act_avg'] = r2_act_avg[f'layer_{i}_act_avg'].squeeze()
         r2_act_avg[f'layer_{i}_act_avg'] = r2_act_avg[f'layer_{i}_act_avg'].reshape(config.num_key_value_heads,
@@ -168,12 +201,20 @@ def get_sorting_index(model, dataloader, save_path, args):
         _, sorted_idx[f"model.layers.{i}.self_attn.R2"] = torch.sort(
             r2_act_avg[f'layer_{i}_act_avg'].abs(), dim=-1, descending=True)
         for j in range(config.num_key_value_heads):
+            # sorted_idx[f"model.layers.{i}.self_attn.R2"][j] = scatter_largest_to_groups(
+            #     sorted_idx[f"model.layers.{i}.self_attn.R2"][j], 32)
             sorted_idx[f"model.layers.{i}.self_attn.R2"][j] = sorted_idx[f"model.layers.{i}.self_attn.R2"][j] + \
                 j * config.hidden_size // config.num_attention_heads
         sorted_idx[f"model.layers.{i}.self_attn.R2"] = sorted_idx[f"model.layers.{i}.self_attn.R2"].reshape(-1)
         _, sorted_idx[f"model.layers.{i}.self_attn.R4"] = torch.sort(
             r4_act_avg[f'layer_{i}_act_avg'].squeeze().abs(), dim=-1, descending=True)
-    torch.save(sorted_idx, os.path.join(save_path, f'{args.model.split("/")[-1]}-sorted_idx.pt'))
+        # sorted_idx[f"model.layers.{i}.self_attn.R4"] = scatter_largest_to_groups(
+        #     sorted_idx[f"model.layers.{i}.self_attn.R4"], 32)
+    save_path = os.path.join(save_path, f'{args.model.split("/")[-1]}-max-sorted-idx.pt')
+    torch.save(sorted_idx, save_path)
+    print(f'Saved sorted index in {save_path}.')
+    # torch.save(q_states, os.path.join(save_path, f'{args.model.split("/")[-1]}-q_states.pt'))
+    # torch.save(k_states, os.path.join(save_path, f'{args.model.split("/")[-1]}-k_states.pt'))
 
     del fp_inps
     torch.cuda.empty_cache()
@@ -193,6 +234,8 @@ def parse_args():
     parser.add_argument("--calib_dataset", type=str, default="wikitext2",
                         choices=["wikitext2", "ptb", "c4"],
                         help="Where to extract calibration data from.",)
+    parser.add_argument('--per_smooth', type=str2path, default=False,
+                        help='Whether to apply per-smooth on the model.')
     parser.add_argument('--nsamples', type=int, default=128)
     parser.add_argument('--seqlen', type=int, default=2048)
     parser.add_argument("--seed", type=int, default=0, help="Seed for sampling the calibration data.")
@@ -212,9 +255,12 @@ def main():
     args = parse_args()
     transformers.set_seed(args.seed)
     model = model_utils.get_model(args.model, args.hf_token)
-
+    if args.per_smooth:
+        from scale_utils import smooth
+        smooth_scales = torch.load(args.per_smooth, weights_only=False)
+        smooth.smooth_lm(model, smooth_scales, 1.0)
     rotation_utils.fuse_layer_norms(model)
-    dataloader = data_utils.get_loaders(
+    dataloader = calib.get_loaders(
         args.calib_dataset,
         nsamples=args.nsamples,
         seed=args.seed,
